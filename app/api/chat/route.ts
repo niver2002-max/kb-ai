@@ -86,18 +86,16 @@ export async function POST(req: Request) {
     })
   }
 
-  // 5) 边转发边累积完整回答，结束后持久化助手消息（含引用）
-  const [toClient, toBuffer] = stream.tee()
-  ;(async () => {
-    try {
-      const reader = toBuffer.getReader()
-      const decoder = new TextDecoder()
-      let full = ""
-      while (true) {
-        const { done, value } = await reader.read()
-        if (done) break
-        full += decoder.decode(value, { stream: true })
-      }
+  // 5) 边转发边累积完整回答，在流的 flush（响应生命周期内）持久化助手消息（含引用）。
+  // 用 TransformStream 而非 fire-and-forget：确保在 sandbox/serverless 上写盘随流完成，不被提前销毁。
+  const decoder = new TextDecoder()
+  let full = ""
+  const persistTransform = new TransformStream<Uint8Array, Uint8Array>({
+    transform(chunk, controller) {
+      full += decoder.decode(chunk, { stream: true })
+      controller.enqueue(chunk)
+    },
+    async flush() {
       if (full.trim()) {
         await appendMessage(libId, {
           role: "assistant",
@@ -106,12 +104,10 @@ export async function POST(req: Request) {
           scope: scope ?? null,
         })
       }
-    } catch {
-      // 累积失败不影响已发送给客户端的内容
-    }
-  })()
+    },
+  })
 
-  return new Response(toClient, {
+  return new Response(stream.pipeThrough(persistTransform), {
     headers: {
       "Content-Type": "text/plain; charset=utf-8",
       "Cache-Control": "no-cache",

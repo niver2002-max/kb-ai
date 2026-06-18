@@ -191,7 +191,7 @@ export function BuildWizard({
               }
             />
           )}
-          <RestartButton onClick={() => run("restart", () => restartWorkflow())} disabled={pending} />
+          <RestartButton onClick={() => run("restart", () => restartWorkflow(libId))} disabled={pending} />
         </RoundCard>
       )}
 
@@ -237,7 +237,7 @@ export function BuildWizard({
             </p>
             <div className="flex items-center gap-3">
               <Button
-                onClick={() => run("accept", () => acceptBuild(), "验收通过")}
+                onClick={() => run("accept", () => acceptBuild(libId), "验收通过")}
                 disabled={pending}
               >
                 {action === "accept" ? (
@@ -248,7 +248,7 @@ export function BuildWizard({
                 验收并进入对话
               </Button>
               <RestartButton
-                onClick={() => run("restart", () => restartWorkflow())}
+                onClick={() => run("restart", () => restartWorkflow(libId))}
                 disabled={pending}
               />
             </div>
@@ -272,7 +272,7 @@ export function BuildWizard({
                 <MessageSquare className="size-4" /> 进入对话问答
               </Button>
               <RestartButton
-                onClick={() => run("restart", () => restartWorkflow())}
+                onClick={() => run("restart", () => restartWorkflow(libId))}
                 disabled={pending}
                 label="重新构建"
               />

@@ -135,6 +135,25 @@ export async function scanDirectory(
   return { rootDir: abs, sources, totalSize }
 }
 
+// 扫描单个文件，返回其来源条目（自动按扩展名归类）
+export async function scanSingleFile(filePath: string): Promise<KbSource> {
+  const abs = path.resolve(filePath)
+  const stat = await fs.stat(abs) // 不存在/不可读会抛错
+  if (!stat.isFile()) throw new Error(`路径不是文件: ${abs}`)
+  const ext = path.extname(abs)
+  return {
+    id: makeId(abs),
+    kind: "file",
+    location: abs,
+    name: path.basename(abs),
+    category: categorize(ext),
+    ext,
+    sizeBytes: stat.size,
+    status: "discovered",
+    updatedAt: Date.now(),
+  }
+}
+
 export function makeWebSource(url: string): KbSource {
   return {
     id: makeId(url),

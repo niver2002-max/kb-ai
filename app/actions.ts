@@ -1,6 +1,6 @@
 "use server"
 
-import { scanDirectory, makeWebSource } from "@/lib/kb/scan"
+import { scanDirectory, scanSingleFile, makeWebSource } from "@/lib/kb/scan"
 import { parseFile, fetchWeb, chunkSegments } from "@/lib/kb/parse"
 import { embedSegments, visionExtract } from "@/lib/kb/embed"
 import { geminiJson, geminiContents } from "@/lib/kb/gemini"
@@ -127,6 +127,14 @@ export async function scanDir(libId: string, rootDir: string) {
   await setRootDir(libId, result.rootDir)
   await upsertSources(libId, result.sources)
   return getKbState(libId)
+}
+
+// 导入单个文件：扫描 → 自动归类 → 登记为来源（待构建入库）
+export async function importSingleFile(libId: string, filePath: string) {
+  if (!filePath?.trim()) throw new Error("请输入文件路径")
+  const source = await scanSingleFile(filePath.trim())
+  await upsertSources(libId, [source])
+  return { source, state: await getKbState(libId) }
 }
 
 // 添加网页来源
@@ -337,7 +345,7 @@ export async function startBuild(libId: string, userPrompt: string) {
   const candidates = index.sources.filter((s) => s.category !== "binary")
   if (candidates.length === 0) {
     await patchWorkflow(libId, { busy: undefined })
-    throw new Error("没有可用于构建的来源，请先扫描目录或添加网址")
+    throw new Error("没有可用于构建��来源，请先扫描目录或添加网址")
   }
 
   const out = await geminiJson<{
