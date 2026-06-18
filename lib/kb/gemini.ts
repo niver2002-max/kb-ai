@@ -114,6 +114,16 @@ export async function geminiParts(parts: GenPart[], opts: GenOpts = {}): Promise
   return callGenerate(body)
 }
 
+// 多轮对话（非流式）——直接走 generateContent，对第三方中转兼容性最好。
+// 返回完整回答文本（已过滤 thought 摘要）。
+export async function geminiContents(
+  contents: Array<{ role: string; parts: GenPart[] }>,
+  opts: GenOpts = {},
+): Promise<string> {
+  const body = buildBody(contents, opts)
+  return callGenerate(body)
+}
+
 // 结构化 JSON 生成（带 schema），自动解析为对象
 export async function geminiJson<T>(
   prompt: string,
@@ -124,79 +134,31 @@ export async function geminiJson<T>(
   return JSON.parse(raw) as T
 }
 
-// 流式生成纯文本：返回一个 ReadableStream<Uint8Array>（已解码为纯文本增量），
-// 供路由直接以 text/plain 流式返回给前端。
+// 渐进式输出：底层走非流式 generateContent（对第三方中转最稳），
+// 拿到完整回答后按小块切片写入 ReadableStream，前端即可获得"逐字显示"的体验。
+// 这样既规避了第三方中转对 SSE 流式接口兼容性差的问题，又保留了流式 UI 手感。
 export async function geminiStream(
   contents: Array<{ role: string; parts: GenPart[] }>,
   opts: GenOpts = {},
 ): Promise<ReadableStream<Uint8Array>> {
-  const body = buildBody(contents, opts)
-  const res = await fetch(
-    `${BASE}/models/${GEMINI_MODEL}:streamGenerateContent?alt=sse`,
-    {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "x-goog-api-key": getApiKey(),
-      },
-      body: JSON.stringify(body),
-    },
-  )
-  if (!res.ok || !res.body) {
-    const detail = await res.text().catch(() => "")
-    throw new Error(`Gemini streamGenerateContent 失败 (${res.status}): ${detail.slice(0, 500)}`)
-  }
-
-  const upstream = res.body.getReader()
-  const decoder = new TextDecoder()
+  const full = await geminiContents(contents, opts)
   const encoder = new TextEncoder()
-  let buffer = ""
-  let rawLogged = 0
-  let emittedAny = false
+  // 按字符分块（中文友好），每块若干字符，制造平滑的逐字输出
+  const STEP = 2
+  let i = 0
+  const chars = Array.from(full)
 
   return new ReadableStream<Uint8Array>({
     async pull(controller) {
-      const { done, value } = await upstream.read()
-      if (done) {
-        if (!emittedAny) {
-          console.log("[v0] stream end, NO text emitted. tail buffer:", buffer.slice(0, 500))
-        }
+      if (i >= chars.length) {
         controller.close()
         return
       }
-      const decoded = decoder.decode(value, { stream: true })
-      if (rawLogged < 3) {
-        console.log(`[v0] raw chunk #${rawLogged}:`, JSON.stringify(decoded.slice(0, 800)))
-        rawLogged++
-      }
-      buffer += decoded
-      const lines = buffer.split("\n")
-      buffer = lines.pop() ?? ""
-      for (const line of lines) {
-        const trimmed = line.trim()
-        if (!trimmed.startsWith("data:")) continue
-        const data = trimmed.slice(5).trim()
-        if (!data || data === "[DONE]") continue
-        try {
-          const chunk = JSON.parse(data) as {
-            candidates?: Array<{
-              content?: { parts?: Array<{ text?: string; thought?: boolean }> }
-            }>
-          }
-          const parts = chunk.candidates?.[0]?.content?.parts ?? []
-          for (const p of parts) {
-            if (!p.thought && typeof p.text === "string" && p.text) {
-              emittedAny = true
-              controller.enqueue(encoder.encode(p.text))
-            }
-          }
-        } catch {
-          // 跳过不完整/无法解析的 SSE 片段
-        }
-      }
-    },
-    cancel() {
-      void upstream.cancel()
+      const piece = chars.slice(i, i + STEP).join("")
+      i += STEP
+      controller.enqueue(encoder.encode(piece))
+      // 轻微延迟，营造打字机效果；不影响整体速度
+      await new Promise((r) => setTimeout(r, 12))
     },
   })
 }
