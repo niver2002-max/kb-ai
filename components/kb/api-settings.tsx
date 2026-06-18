@@ -35,6 +35,7 @@ export function ApiSettingsDialog() {
   const [baseUrl, setBaseUrl] = useState("")
   const [apiKey, setApiKey] = useState("")
   const [model, setModel] = useState("")
+  const [inspectModel, setInspectModel] = useState("")
   const [embedModel, setEmbedModel] = useState("")
   const [temperature, setTemperature] = useState(0)
   const [stream, setStream] = useState(true)
@@ -51,6 +52,7 @@ export function ApiSettingsDialog() {
       setBaseUrl(s.baseUrl)
       setApiKey(s.apiKey)
       setModel(s.model)
+      setInspectModel(s.inspectModel)
       setEmbedModel(s.embedModel)
       setTemperature(s.temperature)
       setStream(s.stream)
@@ -133,7 +135,7 @@ export function ApiSettingsDialog() {
 
   function save() {
     startTransition(async () => {
-      await saveApiSettings({ baseUrl, apiKey, model, embedModel, temperature, stream })
+      await saveApiSettings({ baseUrl, apiKey, model, inspectModel, embedModel, temperature, stream })
       toast.success("设置已保存")
       setOpen(false)
     })
@@ -238,10 +240,14 @@ export function ApiSettingsDialog() {
           )}
 
           {/* 当前选定（手填兜底） */}
-          <div className="grid gap-3 sm:grid-cols-2">
+          <div className="grid gap-3 sm:grid-cols-3">
             <div className="flex flex-col gap-1.5">
-              <Label htmlFor="model">对话模型</Label>
+              <Label htmlFor="model">对话模型（活动对话）</Label>
               <Input id="model" value={model} onChange={(e) => setModel(e.target.value)} disabled={pending} className="font-mono text-sm" />
+            </div>
+            <div className="flex flex-col gap-1.5">
+              <Label htmlFor="inspect">巡检模型（高级）</Label>
+              <Input id="inspect" value={inspectModel} onChange={(e) => setInspectModel(e.target.value)} disabled={pending} className="font-mono text-sm" />
             </div>
             <div className="flex flex-col gap-1.5">
               <Label htmlFor="embed">向量模型</Label>
