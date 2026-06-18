@@ -7,8 +7,12 @@ export interface ApiSettings {
   baseUrl: string // 第三方 Gemini 原生兼容端点（可只填域名，自动补 /v1beta）
   apiKey: string // API Key（x-goog-api-key）
   model: string // 对话/生成模型（活动对话固定用它，默认 gemini-3.5-flash）
-  inspectModel: string // 巡检模型（高级模型，默认 gemini-3.1-pro）
+  inspectModel: string // 巡检模型（高级模型，默认 gemini-3.1-pro-high）
   embedModel: string // 向量模型
+  // 独立嵌入端点：很多第三方对话中转不提供 embedding 模型，可在此单独指向带向量能力的端点。
+  // 留空则回退主端点（baseUrl/apiKey）。
+  embedBaseUrl: string
+  embedApiKey: string
   temperature: number // 采样温度
   stream: boolean // 是否启用 SSE 流式
 }
@@ -24,8 +28,10 @@ function envDefaults(): ApiSettings {
     baseUrl: process.env.GEMINI_BASE_URL || DEFAULT_BASE,
     apiKey: process.env.GEMINI_API_KEY || "",
     model: process.env.GEMINI_MODEL || "gemini-3.5-flash",
-    inspectModel: process.env.GEMINI_INSPECT_MODEL || "gemini-3.1-pro",
+    inspectModel: process.env.GEMINI_INSPECT_MODEL || "gemini-3.1-pro-high",
     embedModel: process.env.GEMINI_EMBED_MODEL || "gemini-embedding-001",
+    embedBaseUrl: process.env.GEMINI_EMBED_BASE_URL || "",
+    embedApiKey: process.env.GEMINI_EMBED_API_KEY || "",
     temperature: Number.isFinite(t) ? t : 0,
     stream: (process.env.GEMINI_STREAM ?? "true").toLowerCase() !== "false",
   }
@@ -57,6 +63,9 @@ export function getSettings(): ApiSettings {
     model: s.model?.trim() || defaults.model,
     inspectModel: s.inspectModel?.trim() || defaults.inspectModel,
     embedModel: s.embedModel?.trim() || defaults.embedModel,
+    // 嵌入端点留空是合法的（表示复用主端点），因此不回退默认值，仅做 trim。
+    embedBaseUrl: s.embedBaseUrl?.trim() ?? defaults.embedBaseUrl,
+    embedApiKey: s.embedApiKey?.trim() ?? defaults.embedApiKey,
     temperature: Number.isFinite(s.temperature) ? s.temperature : defaults.temperature,
     stream: typeof s.stream === "boolean" ? s.stream : defaults.stream,
   }

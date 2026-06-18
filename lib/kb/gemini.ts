@@ -32,6 +32,22 @@ function MODEL(): string {
 function EMBED_MODEL(): string {
   return getSettings().embedModel
 }
+// 嵌入专用端点：若设置了独立嵌入端点则用它，否则回退主端点。
+// 解决「对话中转不提供 embedding 模型」的常见情况。
+function EMBED_BASE_URL(): string {
+  const s = getSettings()
+  return normalizeBase(s.embedBaseUrl?.trim() || s.baseUrl)
+}
+function EMBED_API_KEY(): string {
+  const s = getSettings()
+  const key = s.embedApiKey?.trim() || s.apiKey
+  if (!key) {
+    throw new Error(
+      "尚未配置 API Key。请点击右上角「设置」配置端点与密钥，或在 .env.local 设置 GEMINI_API_KEY。",
+    )
+  }
+  return key
+}
 function temperature(): number {
   return getSettings().temperature
 }
@@ -422,12 +438,12 @@ export async function geminiEmbedOne(
 ): Promise<number[]> {
   const embedModel = EMBED_MODEL()
   const res = await fetchWithRetry(
-    `${BASE_URL()}/models/${embedModel}:embedContent`,
+    `${EMBED_BASE_URL()}/models/${embedModel}:embedContent`,
     {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
-        "x-goog-api-key": getApiKey(),
+        "x-goog-api-key": EMBED_API_KEY(),
       },
       body: JSON.stringify({
         model: `models/${embedModel}`,
@@ -452,12 +468,12 @@ export async function geminiEmbedBatch(texts: string[]): Promise<number[][]> {
     try {
       const embedModel = EMBED_MODEL()
       const res = await fetchWithRetry(
-        `${BASE_URL()}/models/${embedModel}:batchEmbedContents`,
+        `${EMBED_BASE_URL()}/models/${embedModel}:batchEmbedContents`,
         {
           method: "POST",
           headers: {
             "Content-Type": "application/json",
-            "x-goog-api-key": getApiKey(),
+            "x-goog-api-key": EMBED_API_KEY(),
           },
           body: JSON.stringify({
             requests: slice.map((text) => ({
