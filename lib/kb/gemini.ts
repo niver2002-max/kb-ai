@@ -8,10 +8,21 @@
 //   · 鉴权头：  x-goog-api-key: GEMINI_API_KEY
 //
 // 第三方端点配置：在 .env.local 设置 GEMINI_BASE_URL 指向你的中转地址，例如：
-//   GEMINI_BASE_URL=https://你的中转域名/v1beta
-// 不设置时回退到 Google 官方端点。末尾多余的斜杠会被自动去除。
+//   GEMINI_BASE_URL=https://你的中转域名/v1beta  （也可只填域名，会自动补 /v1beta）
+// 不设置时回退到 Google 官方端点。
 const DEFAULT_BASE = "https://generativelanguage.googleapis.com/v1beta"
-const BASE = (process.env.GEMINI_BASE_URL || DEFAULT_BASE).replace(/\/+$/, "")
+
+function normalizeBase(raw: string): string {
+  let b = raw.trim().replace(/\/+$/, "") // 去掉末尾斜杠
+  // Gemini 原生协议要求带版本路径。若用户只填了域名（无 /v1beta 或 /v1），自动补 /v1beta，
+  // 否则请求会打到中转站点的网页路由，返回 HTML 而非 JSON。
+  if (!/\/v1beta$|\/v1$|\/v1beta\/|\/v1\//.test(b)) {
+    b = `${b}/v1beta`
+  }
+  return b
+}
+
+const BASE = normalizeBase(process.env.GEMINI_BASE_URL || DEFAULT_BASE)
 
 // 仅使用 Gemini 3.5 Flash 原生端点（非 chat 接口）
 export const GEMINI_MODEL = "gemini-3.5-flash"
@@ -91,8 +102,22 @@ async function callGenerate(body: Record<string, unknown>): Promise<string> {
     const detail = await res.text().catch(() => "")
     throw new Error(`Gemini generateContent 失败 (${res.status}): ${detail.slice(0, 500)}`)
   }
-  const json = (await res.json()) as {
+  // 第三方中转若地址不对，常返回 HTML 页面（200）。提前识别，给出可读报错。
+  const text = await res.text()
+  const looksLikeHtml = text.trimStart().startsWith("<")
+  if (looksLikeHtml) {
+    throw new Error(
+      `端点返回了 HTML 而非 JSON，说明 GEMINI_BASE_URL 路径不对（当前实际请求：${BASE}/models/${GEMINI_MODEL}）。` +
+        `请确认中转地址正确，通常应形如 https://域名/v1beta。返回片段：${text.slice(0, 120)}`,
+    )
+  }
+  let json: {
     candidates?: Array<{ content?: { parts?: Array<{ text?: string; thought?: boolean }> } }>
+  }
+  try {
+    json = JSON.parse(text)
+  } catch {
+    throw new Error(`端点返回了无法解析的内容：${text.slice(0, 200)}`)
   }
   const parts = json.candidates?.[0]?.content?.parts ?? []
   // 跳过 thought 摘要，只取正式回答文本
