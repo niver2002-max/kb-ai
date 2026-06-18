@@ -165,31 +165,112 @@ export async function geminiJson<T>(
   return JSON.parse(raw) as T
 }
 
-// 渐进式输出：底层走非流式 generateContent（对第三方中转最稳），
-// 拿到完整回答后按小块切片写入 ReadableStream，前端即可获得"逐字显示"的体验。
-// 这样既规避了第三方中转对 SSE 流式接口兼容性差的问题，又保留了流式 UI 手感。
-export async function geminiStream(
-  contents: Array<{ role: string; parts: GenPart[] }>,
-  opts: GenOpts = {},
-): Promise<ReadableStream<Uint8Array>> {
-  const full = await geminiContents(contents, opts)
+// 把一段完整文本按字符切片写入流，模拟打字机效果（非流式降级路径用）。
+function sliceToStream(full: string): ReadableStream<Uint8Array> {
   const encoder = new TextEncoder()
-  // 按字符分块（中文友好），每块若干字符，制造平滑的逐字输出
   const STEP = 2
   let i = 0
   const chars = Array.from(full)
-
   return new ReadableStream<Uint8Array>({
     async pull(controller) {
       if (i >= chars.length) {
         controller.close()
         return
       }
-      const piece = chars.slice(i, i + STEP).join("")
+      controller.enqueue(encoder.encode(chars.slice(i, i + STEP).join("")))
       i += STEP
-      controller.enqueue(encoder.encode(piece))
-      // 轻微延迟，营造打字机效果；不影响整体速度
       await new Promise((r) => setTimeout(r, 12))
+    },
+  })
+}
+
+// 对话输出：优先尝试真·SSE 流式（streamGenerateContent?alt=sse），
+// 若中转不支持（请求失败 / 首块是 HTML / 整流无文本产出），自动降级为非流式 generateContent + 切片。
+// 用环境变量 GEMINI_STREAM=false 可强制只走非流式。
+export async function geminiStream(
+  contents: Array<{ role: string; parts: GenPart[] }>,
+  opts: GenOpts = {},
+): Promise<ReadableStream<Uint8Array>> {
+  const streamEnabled = (process.env.GEMINI_STREAM ?? "true").toLowerCase() !== "false"
+  if (!streamEnabled) {
+    console.log("[v0] GEMINI_STREAM=false，直接走非流式")
+    return sliceToStream(await geminiContents(contents, opts))
+  }
+
+  const body = buildBody(contents, opts)
+  let res: Response
+  try {
+    res = await fetch(`${BASE}/models/${GEMINI_MODEL}:streamGenerateContent?alt=sse`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "x-goog-api-key": getApiKey() },
+      body: JSON.stringify(body),
+    })
+  } catch (e) {
+    console.log("[v0] 流式请求异常，降级非流式:", (e as Error).message)
+    return sliceToStream(await geminiContents(contents, opts))
+  }
+
+  if (!res.ok || !res.body) {
+    console.log(`[v0] 流式响应不可用 (status=${res.status})，降级非流式`)
+    return sliceToStream(await geminiContents(contents, opts))
+  }
+
+  // 预读首块，判断是否为合法 SSE。若是 HTML 或非 data: 帧，则降级。
+  const reader = res.body.getReader()
+  const decoder = new TextDecoder()
+  const first = await reader.read()
+  const firstText = first.value ? decoder.decode(first.value, { stream: true }) : ""
+  if (firstText.trimStart().startsWith("<") || !firstText.includes("data:")) {
+    console.log("[v0] 首块非 SSE 格式，降级非流式。片段:", JSON.stringify(firstText.slice(0, 120)))
+    reader.cancel().catch(() => {})
+    return sliceToStream(await geminiContents(contents, opts))
+  }
+
+  console.log("[v0] 走真·SSE 流式")
+  const encoder = new TextEncoder()
+  let buffer = firstText
+  let emitted = false
+
+  function drain(controller: ReadableStreamDefaultController<Uint8Array>) {
+    const lines = buffer.split("\n")
+    buffer = lines.pop() ?? ""
+    for (const line of lines) {
+      const t = line.trim()
+      if (!t.startsWith("data:")) continue
+      const data = t.slice(5).trim()
+      if (!data || data === "[DONE]") continue
+      try {
+        const chunk = JSON.parse(data) as {
+          candidates?: Array<{ content?: { parts?: Array<{ text?: string; thought?: boolean }> } }>
+        }
+        for (const p of chunk.candidates?.[0]?.content?.parts ?? []) {
+          if (!p.thought && typeof p.text === "string" && p.text) {
+            emitted = true
+            controller.enqueue(encoder.encode(p.text))
+          }
+        }
+      } catch {
+        // 跳过不完整片段
+      }
+    }
+  }
+
+  return new ReadableStream<Uint8Array>({
+    async pull(controller) {
+      // 先冲掉首块里已就绪的内容
+      if (buffer.includes("\n")) drain(controller)
+      const { done, value } = await reader.read()
+      if (done) {
+        if (buffer.trim()) drain(controller)
+        if (!emitted) console.log("[v0] 流结束但无文本产出")
+        controller.close()
+        return
+      }
+      buffer += decoder.decode(value, { stream: true })
+      drain(controller)
+    },
+    cancel() {
+      reader.cancel().catch(() => {})
     },
   })
 }
