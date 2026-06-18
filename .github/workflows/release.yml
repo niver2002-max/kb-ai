@@ -58,14 +58,54 @@ jobs:
           if [ -d public ]; then cp -r public "$DIST/public"; fi
 
           # Windows 一键启动脚本（双击运行）。默认端口 3000，可用 set PORT=xxxx 覆盖。
+          # 关键：切到脚本目录、检测 Node、出错暂停，避免“闪一下就消失”看不到原因。
           cat > "$DIST/start.bat" << 'EOF'
           @echo off
+          chcp 65001 >nul
           setlocal
+          rem 切换到脚本所在目录，确保能找到 server.js（双击运行时工作目录可能不对）
+          cd /d "%~dp0"
+
+          rem 检测 Node 是否已安装并在 PATH 中
+          where node >nul 2>nul
+          if errorlevel 1 (
+            echo.
+            echo [错误] 未检测到 Node.js。
+            echo 请先到 https://nodejs.org 下载安装 Node.js 20 或更高版本，安装后重新运行本程序。
+            echo.
+            pause
+            exit /b 1
+          )
+
           if "%PORT%"=="" set PORT=3000
           set HOSTNAME=127.0.0.1
-          echo Starting KB-AI on http://127.0.0.1:%PORT%
-          start "" http://127.0.0.1:%PORT%
+
+          rem 确认 server.js 存在
+          if not exist "server.js" (
+            echo.
+            echo [错误] 未找到 server.js，请确认已将压缩包完整解压后再运行本脚本。
+            echo 当前目录：%CD%
+            echo.
+            pause
+            exit /b 1
+          )
+
+          echo 正在启动 KB-AI，地址： http://127.0.0.1:%PORT%
+          echo 启动后浏览器会自动打开；如未打开，请手动访问上面的地址。
+          echo 关闭本窗口即可停止服务。
+          echo.
+
+          rem 延迟几秒再打开浏览器，等服务器就绪
+          start "" /b cmd /c "timeout /t 3 >nul & start "" http://127.0.0.1:%PORT%"
+
           node server.js
+          set EXITCODE=%errorlevel%
+          if not "%EXITCODE%"=="0" (
+            echo.
+            echo [错误] 服务异常退出，错误码 %EXITCODE%。请将以上信息截图反馈。
+            echo.
+            pause
+          )
           endlocal
           EOF
 
