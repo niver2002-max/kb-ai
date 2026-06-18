@@ -151,15 +151,25 @@ export async function geminiStream(
   const decoder = new TextDecoder()
   const encoder = new TextEncoder()
   let buffer = ""
+  let rawLogged = 0
+  let emittedAny = false
 
   return new ReadableStream<Uint8Array>({
     async pull(controller) {
       const { done, value } = await upstream.read()
       if (done) {
+        if (!emittedAny) {
+          console.log("[v0] stream end, NO text emitted. tail buffer:", buffer.slice(0, 500))
+        }
         controller.close()
         return
       }
-      buffer += decoder.decode(value, { stream: true })
+      const decoded = decoder.decode(value, { stream: true })
+      if (rawLogged < 3) {
+        console.log(`[v0] raw chunk #${rawLogged}:`, JSON.stringify(decoded.slice(0, 800)))
+        rawLogged++
+      }
+      buffer += decoded
       const lines = buffer.split("\n")
       buffer = lines.pop() ?? ""
       for (const line of lines) {
@@ -176,6 +186,7 @@ export async function geminiStream(
           const parts = chunk.candidates?.[0]?.content?.parts ?? []
           for (const p of parts) {
             if (!p.thought && typeof p.text === "string" && p.text) {
+              emittedAny = true
               controller.enqueue(encoder.encode(p.text))
             }
           }
