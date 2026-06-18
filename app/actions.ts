@@ -82,6 +82,85 @@ export async function deleteKbLibrary(id: string) {
 }
 
 // ===================================================================
+// 文件系统浏览（应用内目录/文件选择弹窗用）
+// ===================================================================
+
+export interface FsEntry {
+  name: string
+  path: string
+  isDir: boolean
+}
+
+export interface BrowseResult {
+  cwd: string // 当前目录绝对路径
+  parent: string | null // 上级目录（根目录为 null）
+  entries: FsEntry[]
+}
+
+// 列出某目录下的子目录与文件。dirPath 为空时从用户主目录开始。
+// onlyDirs=true 仅返回目录（选目录场景）。
+export async function browseFs(
+  dirPath?: string,
+  opts?: { onlyDirs?: boolean },
+): Promise<BrowseResult> {
+  const os = await import("node:os")
+  const fsmod = await import("node:fs/promises")
+  const pathmod = await import("node:path")
+
+  const base = dirPath?.trim() ? pathmod.resolve(dirPath.trim()) : os.homedir()
+  // 校验目录存在且可读；不可读时回退主目录
+  let cwd = base
+  try {
+    const stat = await fsmod.stat(cwd)
+    if (!stat.isDirectory()) cwd = pathmod.dirname(cwd)
+  } catch {
+    cwd = os.homedir()
+  }
+
+  let dirents: import("node:fs").Dirent[] = []
+  try {
+    dirents = await fsmod.readdir(cwd, { withFileTypes: true })
+  } catch {
+    throw new Error(`无法读取目录：${cwd}`)
+  }
+
+  const onlyDirs = opts?.onlyDirs ?? false
+  const entries: FsEntry[] = dirents
+    .filter((d) => !d.name.startsWith(".")) // 隐藏点文件/点目录
+    .filter((d) => {
+      const isDir = d.isDirectory()
+      return onlyDirs ? isDir : isDir || d.isFile()
+    })
+    .map((d) => ({
+      name: d.name,
+      path: pathmod.join(cwd, d.name),
+      isDir: d.isDirectory(),
+    }))
+    .sort((a, b) => {
+      if (a.isDir !== b.isDir) return a.isDir ? -1 : 1 // 目录在前
+      return a.name.localeCompare(b.name)
+    })
+
+  const parent = pathmod.dirname(cwd)
+  return {
+    cwd,
+    parent: parent === cwd ? null : parent,
+    entries,
+  }
+}
+
+// 新建子目录（选目录弹窗里"新建文件夹"用）
+export async function makeDir(parentDir: string, name: string): Promise<string> {
+  const pathmod = await import("node:path")
+  const fsmod = await import("node:fs/promises")
+  const safe = name.trim().replace(/[/\\]/g, "")
+  if (!safe) throw new Error("请输入文件夹名称")
+  const target = pathmod.join(pathmod.resolve(parentDir), safe)
+  await fsmod.mkdir(target, { recursive: true })
+  return target
+}
+
+// ===================================================================
 // 会话持久化（resume / 读取 / 清空）
 // ===================================================================
 

@@ -9,6 +9,7 @@ import {
   importSingleFile,
 } from "@/app/actions"
 import { SiteCrawler } from "@/components/kb/site-crawler"
+import { PathPicker } from "@/components/kb/path-picker"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import {
@@ -22,7 +23,7 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import { Checkbox } from "@/components/ui/checkbox"
 import { formatSize } from "@/lib/kb/labels"
 import { toast } from "sonner"
-import { Plus, FolderInput, FileInput, Globe, Loader2, Check } from "lucide-react"
+import { Plus, FolderInput, FileInput, Globe, Loader2, Check, FolderSearch } from "lucide-react"
 import type { KbSource } from "@/lib/kb/types"
 
 // 加号导入菜单：三种方式
@@ -98,6 +99,7 @@ function DirImport({
   const [busy, setBusy] = useState("")
   const [picked, setPicked] = useState<Set<string>>(new Set())
   const [reviewed, setReviewed] = useState(false)
+  const [pickerOpen, setPickerOpen] = useState(false)
   const [pending, startTransition] = useTransition()
 
   // 本目录扫描出的来源（已带相关性评分）
@@ -166,12 +168,24 @@ function DirImport({
 
   return (
     <div className="flex flex-col gap-3">
-      <Input
-        placeholder="目录绝对路径，如 /Users/me/docs"
-        value={dir}
-        onChange={(e) => setDir(e.target.value)}
-        disabled={pending}
-      />
+      <div className="flex gap-2">
+        <Input
+          placeholder="目录绝对路径，如 /Users/me/docs"
+          value={dir}
+          onChange={(e) => setDir(e.target.value)}
+          disabled={pending}
+        />
+        <Button
+          type="button"
+          variant="outline"
+          onClick={() => setPickerOpen(true)}
+          disabled={pending}
+          className="shrink-0 gap-1.5"
+        >
+          <FolderSearch className="size-4" />
+          浏览
+        </Button>
+      </div>
       <Input
         placeholder="想筛选什么内容？（可选，帮助 AI 判断相关性）"
         value={goal}
@@ -201,6 +215,14 @@ function DirImport({
           </div>
         </div>
       )}
+
+      <PathPicker
+        open={pickerOpen}
+        onOpenChange={setPickerOpen}
+        mode="dir"
+        initialDir={dir}
+        onSelect={(p) => setDir(p)}
+      />
     </div>
   )
 }
@@ -259,6 +281,7 @@ function FileImportPanel({
 }) {
   const [file, setFile] = useState("")
   const [busy, setBusy] = useState("")
+  const [pickerOpen, setPickerOpen] = useState(false)
   const [pending, startTransition] = useTransition()
 
   function importFile() {
@@ -287,16 +310,35 @@ function FileImportPanel({
       <p className="text-sm text-muted-foreground">
         输入单个文件的绝对路径，系统会自动按类型归类并直接入库。
       </p>
-      <Input
-        placeholder="文件绝对路径，如 /Users/me/docs/spec.pdf"
-        value={file}
-        onChange={(e) => setFile(e.target.value)}
-        disabled={pending}
-      />
+      <div className="flex gap-2">
+        <Input
+          placeholder="文件绝对路径，如 /Users/me/docs/spec.pdf"
+          value={file}
+          onChange={(e) => setFile(e.target.value)}
+          disabled={pending}
+        />
+        <Button
+          type="button"
+          variant="outline"
+          onClick={() => setPickerOpen(true)}
+          disabled={pending}
+          className="shrink-0 gap-1.5"
+        >
+          <FolderSearch className="size-4" />
+          浏览
+        </Button>
+      </div>
       <Button onClick={importFile} disabled={pending} className="gap-1.5 self-start">
         {busy ? <Loader2 className="size-4 animate-spin" /> : <FileInput className="size-4" />}
         {busy || "导入并归类"}
       </Button>
+
+      <PathPicker
+        open={pickerOpen}
+        onOpenChange={setPickerOpen}
+        mode="file"
+        onSelect={(p) => setFile(p)}
+      />
     </div>
   )
 }

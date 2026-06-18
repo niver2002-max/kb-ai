@@ -7,8 +7,9 @@ import { Input } from "@/components/ui/input"
 import { Textarea } from "@/components/ui/textarea"
 import { Label } from "@/components/ui/label"
 import { Card } from "@/components/ui/card"
-import { Loader2, FolderPlus, BookOpen, Globe, FolderTree } from "lucide-react"
+import { Loader2, FolderPlus, BookOpen, Globe, FolderTree, FolderSearch } from "lucide-react"
 import { createKbLibrary } from "@/app/actions"
+import { PathPicker } from "@/components/kb/path-picker"
 import type { KbLibrary } from "@/lib/kb/types"
 
 type SourceMode = KbLibrary["sourceMode"]
@@ -35,6 +36,7 @@ export function Onboarding({
   const [audience, setAudience] = useState("")
   const [rootDir, setRootDir] = useState("")
   const [mode, setMode] = useState<SourceMode>("materials")
+  const [pickerOpen, setPickerOpen] = useState(false)
   const [pending, startTransition] = useTransition()
 
   function submit() {
@@ -104,14 +106,26 @@ export function Onboarding({
 
         <div className="flex flex-col gap-2">
           <Label htmlFor="kb-dir">存放目录（绝对路径）</Label>
-          <Input
-            id="kb-dir"
-            placeholder="例如：/Users/you/knowledge-bases/gowin 或项目内 kb/gowin"
-            value={rootDir}
-            onChange={(e) => setRootDir(e.target.value)}
-            disabled={pending}
-            className="font-mono text-sm"
-          />
+          <div className="flex gap-2">
+            <Input
+              id="kb-dir"
+              placeholder="例如：/Users/you/knowledge-bases/gowin"
+              value={rootDir}
+              onChange={(e) => setRootDir(e.target.value)}
+              disabled={pending}
+              className="font-mono text-sm"
+            />
+            <Button
+              type="button"
+              variant="outline"
+              onClick={() => setPickerOpen(true)}
+              disabled={pending}
+              className="shrink-0 gap-1.5"
+            >
+              <FolderSearch className="size-4" />
+              浏览
+            </Button>
+          </div>
           <p className="text-xs text-muted-foreground">
             将在此目录建立 sources/、raw/、imports/、exports/、notes/ 分层并初始化 git。
           </p>
@@ -156,6 +170,14 @@ export function Onboarding({
           </Button>
         </div>
       </Card>
+
+      <PathPicker
+        open={pickerOpen}
+        onOpenChange={setPickerOpen}
+        mode="dir"
+        initialDir={rootDir}
+        onSelect={(p) => setRootDir(p)}
+      />
     </div>
   )
 }
