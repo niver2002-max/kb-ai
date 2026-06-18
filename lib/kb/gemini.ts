@@ -66,6 +66,8 @@ interface GenOpts {
   thinking?: ThinkingLevel
   // 结构化输出：传入 Gemini OpenAPI 风格 schema（type 用大写枚举）
   responseSchema?: Record<string, unknown>
+  // Gemini 原生工具，例如 [{ url_context: {} }]（抓网页）、[{ google_search: {} }]（联网检索）
+  tools?: Record<string, unknown>[]
 }
 
 function buildBody(
@@ -75,11 +77,15 @@ function buildBody(
   const generationConfig: Record<string, unknown> = { temperature: TEMPERATURE }
   const tc = thinkingConfig(opts.thinking ?? "adaptive")
   if (tc) generationConfig.thinkingConfig = tc
+  // 注意：responseSchema（结构化输出）与 tools（工具调用）互斥，不要同时传。
   if (opts.responseSchema) {
     generationConfig.responseMimeType = "application/json"
     generationConfig.responseSchema = opts.responseSchema
   }
   const body: Record<string, unknown> = { contents, generationConfig }
+  if (opts.tools && opts.tools.length > 0) {
+    body.tools = opts.tools
+  }
   if (opts.system) {
     body.systemInstruction = { parts: [{ text: opts.system }] }
   }
