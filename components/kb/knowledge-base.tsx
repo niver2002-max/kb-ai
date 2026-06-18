@@ -1,6 +1,6 @@
 "use client"
 
-import { useState, useTransition } from "react"
+import { useState, useTransition, useRef, useEffect, useCallback } from "react"
 import type { KbSource, KbWorkflow, KbLibrary, KbMessage } from "@/lib/kb/types"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
@@ -9,7 +9,7 @@ import { Onboarding } from "@/components/kb/onboarding"
 import { Workspace } from "@/components/kb/workspace"
 import { getKbState, getSession, getLibraries, deleteKbLibrary } from "@/app/actions"
 import { toast } from "sonner"
-import { Database, Plus, Trash2, Loader2, FolderTree, Globe, BookOpen, ArrowRight } from "lucide-react"
+import { Database, Plus, Trash2, Loader2, FolderTree, Globe, BookOpen, ArrowRight, ChevronLeft, ChevronRight, Clock } from "lucide-react"
 
 // 单库的运行态快照（客户端组件共享）
 export interface KbState {
@@ -32,11 +32,52 @@ const MODE_META: Record<KbLibrary["sourceMode"], { label: string; icon: typeof B
   mixed: { label: "混合来源", icon: BookOpen },
 }
 
+// 相对时间（更新先后）
+function relTime(ts: number): string {
+  const diff = Date.now() - ts
+  const m = Math.floor(diff / 60000)
+  if (m < 1) return "刚刚"
+  if (m < 60) return `${m} 分钟前`
+  const h = Math.floor(m / 60)
+  if (h < 24) return `${h} 小时前`
+  const d = Math.floor(h / 24)
+  if (d < 30) return `${d} 天前`
+  return new Date(ts).toLocaleDateString()
+}
+
 export function KnowledgeBase({ initialLibraries }: { initialLibraries: KbLibrary[] }) {
   const [libraries, setLibraries] = useState<KbLibrary[]>(initialLibraries)
   const [view, setView] = useState<View>({ kind: "list" })
   const [pending, startTransition] = useTransition()
   const [enteringId, setEnteringId] = useState<string | null>(null)
+
+  // 横向滚动：左右箭头 + 边缘可滚动判定
+  const scrollerRef = useRef<HTMLDivElement>(null)
+  const [canLeft, setCanLeft] = useState(false)
+  const [canRight, setCanRight] = useState(false)
+
+  const updateArrows = useCallback(() => {
+    const el = scrollerRef.current
+    if (!el) return
+    setCanLeft(el.scrollLeft > 4)
+    setCanRight(el.scrollLeft + el.clientWidth < el.scrollWidth - 4)
+  }, [])
+
+  useEffect(() => {
+    updateArrows()
+    const el = scrollerRef.current
+    if (!el) return
+    el.addEventListener("scroll", updateArrows, { passive: true })
+    window.addEventListener("resize", updateArrows)
+    return () => {
+      el.removeEventListener("scroll", updateArrows)
+      window.removeEventListener("resize", updateArrows)
+    }
+  }, [updateArrows, libraries.length, view])
+
+  function scrollBy(dir: -1 | 1) {
+    scrollerRef.current?.scrollBy({ left: dir * 320, behavior: "smooth" })
+  }
 
   // 进入某个知识库工作区：拉取 state + 会话（resume）
   function enterLibrary(library: KbLibrary) {
@@ -119,64 +160,95 @@ export function KnowledgeBase({ initialLibraries }: { initialLibraries: KbLibrar
 
       <div className="flex items-center justify-between">
         <span className="text-sm font-medium">{`我的知识库（${libraries.length}）`}</span>
-        <Button onClick={() => setView({ kind: "onboarding" })} className="gap-1.5">
-          <Plus className="size-4" />
-          新建知识库
-        </Button>
+        {libraries.length > 0 && (
+          <div className="flex items-center gap-1">
+            <Button
+              variant="outline"
+              size="icon"
+              className="size-7"
+              onClick={() => scrollBy(-1)}
+              disabled={!canLeft}
+              aria-label="向左滚动"
+            >
+              <ChevronLeft className="size-4" />
+            </Button>
+            <Button
+              variant="outline"
+              size="icon"
+              className="size-7"
+              onClick={() => scrollBy(1)}
+              disabled={!canRight}
+              aria-label="向右滚动"
+            >
+              <ChevronRight className="size-4" />
+            </Button>
+          </div>
+        )}
       </div>
 
-      {libraries.length === 0 ? (
-        <Card className="flex flex-col items-center gap-3 border-dashed p-10 text-center">
-          <FolderTree className="size-8 text-muted-foreground" />
-          <p className="text-sm text-muted-foreground">还没有知识库，点击「新建知识库」开始引导流程。</p>
-          <Button onClick={() => setView({ kind: "onboarding" })} variant="outline" className="gap-1.5">
-            <Plus className="size-4" /> 新建知识库
-          </Button>
-        </Card>
-      ) : (
-        <div className="grid gap-3 sm:grid-cols-2">
-          {libraries.map((lib) => {
-            const meta = MODE_META[lib.sourceMode]
-            const Icon = meta.icon
-            const busy = enteringId === lib.id
-            return (
-              <Card key={lib.id} className="group flex flex-col gap-3 p-4 transition-colors hover:border-foreground/30">
-                <div className="flex items-start justify-between gap-2">
-                  <div className="flex min-w-0 flex-col gap-1">
-                    <h3 className="truncate text-sm font-semibold">{lib.title}</h3>
-                    <p className="line-clamp-2 text-xs leading-relaxed text-muted-foreground">{lib.audience || "未填写用途"}</p>
-                  </div>
-                  <Button
-                    variant="ghost"
-                    size="icon"
-                    className="size-7 shrink-0 text-muted-foreground opacity-0 transition-opacity group-hover:opacity-100"
-                    onClick={() => removeLibrary(lib.id)}
-                    disabled={pending}
-                    aria-label="删除知识库"
-                  >
-                    <Trash2 className="size-3.5" />
-                  </Button>
-                </div>
-                <div className="flex items-center gap-2 text-xs text-muted-foreground">
-                  <Icon className="size-3.5" />
-                  <span>{meta.label}</span>
-                  {lib.hasGit && <Badge variant="outline" className="font-mono text-[10px]">git</Badge>}
+      <div
+        ref={scrollerRef}
+        className="flex gap-3 overflow-x-auto pb-2 [scrollbar-width:thin]"
+      >
+        {/* 新建卡片（收敛唯一入口） */}
+        <button
+          type="button"
+          onClick={() => setView({ kind: "onboarding" })}
+          className="flex w-44 shrink-0 flex-col items-center justify-center gap-2 rounded-lg border border-dashed border-border text-muted-foreground transition-colors hover:border-foreground/40 hover:text-foreground"
+        >
+          <Plus className="size-6" />
+          <span className="text-sm font-medium">新建知识库</span>
+        </button>
+
+        {/* 已有库：按更新时间倒序（listLibraries 已倒序） */}
+        {libraries.map((lib) => {
+          const meta = MODE_META[lib.sourceMode]
+          const Icon = meta.icon
+          const busy = enteringId === lib.id
+          return (
+            <Card
+              key={lib.id}
+              className="group flex w-64 shrink-0 cursor-pointer flex-col gap-3 p-4 transition-colors hover:border-foreground/30"
+              onClick={() => !pending && enterLibrary(lib)}
+            >
+              <div className="flex items-start justify-between gap-2">
+                <div className="flex min-w-0 flex-col gap-1">
+                  <h3 className="truncate text-sm font-semibold">{lib.title}</h3>
+                  <p className="line-clamp-2 text-xs leading-relaxed text-muted-foreground">{lib.audience || "未填写用途"}</p>
                 </div>
                 <Button
-                  onClick={() => enterLibrary(lib)}
+                  variant="ghost"
+                  size="icon"
+                  className="size-7 shrink-0 text-muted-foreground opacity-0 transition-opacity group-hover:opacity-100"
+                  onClick={(e) => {
+                    e.stopPropagation()
+                    removeLibrary(lib.id)
+                  }}
                   disabled={pending}
-                  size="sm"
-                  variant="secondary"
-                  className="mt-auto gap-1.5"
+                  aria-label="删除知识库"
                 >
-                  {busy ? <Loader2 className="size-4 animate-spin" /> : <ArrowRight className="size-4" />}
-                  {busy ? "打开中…" : "进入对话"}
+                  <Trash2 className="size-3.5" />
                 </Button>
-              </Card>
-            )
-          })}
-        </div>
-      )}
+              </div>
+              <div className="flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
+                <Icon className="size-3.5" />
+                <span>{meta.label}</span>
+                {lib.hasGit && <Badge variant="outline" className="font-mono text-[10px]">git</Badge>}
+              </div>
+              <div className="mt-auto flex items-center justify-between text-xs text-muted-foreground">
+                <span className="flex items-center gap-1">
+                  <Clock className="size-3" />
+                  {relTime(lib.updatedAt)}
+                </span>
+                <span className="flex items-center gap-1 font-medium text-foreground opacity-0 transition-opacity group-hover:opacity-100">
+                  {busy ? <Loader2 className="size-3.5 animate-spin" /> : <ArrowRight className="size-3.5" />}
+                  {busy ? "打开中…" : "进入"}
+                </span>
+              </div>
+            </Card>
+          )
+        })}
+      </div>
     </div>
   )
 }

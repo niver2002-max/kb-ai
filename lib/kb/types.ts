@@ -177,6 +177,24 @@ export interface ScanResult {
 
 // ===== 多知识库（每库 = 独立目录 + 独立 git + 独立会话 + 独立索引）=====
 
+// 后台自迭代任务类型
+export type AutoIterateTask =
+  | "notes" // 生成/补全笔记与摘要
+  | "gaps" // 找知识缺口并联网补充
+  | "reindex" // 重建索引 / 去重 / 优化分类
+
+// 后台自迭代配置（默认关闭，开启会持续消耗 token）
+export interface AutoIterateConfig {
+  enabled: boolean // 总开关，默认 false
+  tasks: AutoIterateTask[] // 要执行的任务（轮流执行）
+  intervalMinutes: number // 两次迭代最小间隔
+  idleMinutes: number // 多久无前台互动才算"空闲"可迭代
+  lastRunAt?: number // 上次迭代时间
+  lastTaskIndex?: number // 上次执行到的任务下标（用于轮转）
+  lastResult?: string // 上次迭代结果摘要（UI 展示）
+  running?: boolean // 是否正在迭代
+}
+
 // 知识库元信息（保存在 libraries.json 的注册表里，也冗余存一份在库目录）
 export interface KbLibrary {
   id: string
@@ -187,6 +205,10 @@ export interface KbLibrary {
   initialized: boolean // 目录分层 + 初始化是否完成
   // 无资料口头建库：标记是否走联网检索建库
   sourceMode: "materials" | "web" | "mixed"
+  // 后台自迭代配置（可选，缺省视为关闭）
+  autoIterate?: AutoIterateConfig
+  // 最近一次前台互动时间（用于空闲判定）
+  lastActiveAt?: number
   createdAt: number
   updatedAt: number
 }
