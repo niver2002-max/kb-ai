@@ -206,14 +206,69 @@ export async function geminiSearch(
   return callGenerate(body)
 }
 
-// 结构化 JSON 生成（带 schema），自动解析为对象
+// 从可能含代码围栏/多余文字的文本中提取出 JSON 并解析。
+// 第三方中转对 responseSchema 的支持参差不齐，返回的内容常被包在 ```json``` 里
+// 或前后带说明文字，因此不能直接 JSON.parse。
+function extractJson<T>(raw: string): T {
+  const text = raw.trim()
+  // 1) 直接尝试
+  try {
+    return JSON.parse(text) as T
+  } catch {
+    // 继续
+  }
+  // 2) 去掉 markdown 代码围栏 ```json ... ```
+  const fence = text.match(/```(?:json)?\s*([\s\S]*?)```/i)
+  if (fence) {
+    try {
+      return JSON.parse(fence[1].trim()) as T
+    } catch {
+      // 继续
+    }
+  }
+  // 3) 截取第一个 { 或 [ 到与之匹配的最后一个 } 或 ]
+  const firstObj = text.indexOf("{")
+  const firstArr = text.indexOf("[")
+  let start = -1
+  let open = "{"
+  let close = "}"
+  if (firstArr !== -1 && (firstObj === -1 || firstArr < firstObj)) {
+    start = firstArr
+    open = "["
+    close = "]"
+  } else if (firstObj !== -1) {
+    start = firstObj
+  }
+  if (start !== -1) {
+    const end = text.lastIndexOf(close)
+    if (end > start) {
+      const slice = text.slice(start, end + 1)
+      try {
+        return JSON.parse(slice) as T
+      } catch {
+        // 继续
+      }
+    }
+  }
+  throw new Error(`模型未返回合法 JSON。原始片段：${text.slice(0, 200)}`)
+}
+
+// 结构化 JSON 生成（带 schema），自动解析为对象。
+// 很多第三方中转并不支持 responseSchema/responseMimeType，会忽略它并返回普通散文。
+// 因此这里双保险：1) 仍传 responseSchema（官方端点/兼容中转可直接生效）；
+// 2) 把 schema 作为强约束写进提示词，要求模型“只输出纯 JSON”；3) extractJson 容错解析。
 export async function geminiJson<T>(
   prompt: string,
   responseSchema: Record<string, unknown>,
   opts: GenOpts = {},
 ): Promise<T> {
-  const raw = await geminiText(prompt, { ...opts, responseSchema })
-  return JSON.parse(raw) as T
+  const jsonInstruction =
+    `\n\n【输出格式要求 - 必须严格遵守】\n` +
+    `只输出一个合法的 JSON，且必须完全符合下面的 JSON Schema。\n` +
+    `不要输出任何解释、前后缀、Markdown 代码围栏或多余文字，第一个字符必须是 { 或 [。\n` +
+    `JSON Schema：\n${JSON.stringify(responseSchema)}`
+  const raw = await geminiText(prompt + jsonInstruction, { ...opts, responseSchema })
+  return extractJson<T>(raw)
 }
 
 // 把一段完整文本按字符切片写入流，模拟打字机效果（非流式降级路径用）。

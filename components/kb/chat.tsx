@@ -3,6 +3,7 @@
 import { useRef, useState } from "react"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
+import { Markdown } from "@/components/kb/markdown"
 import { SendHorizontal, Sparkles } from "lucide-react"
 
 interface ChatTurn {
@@ -96,13 +97,23 @@ export function Chat({ chunkCount }: { chunkCount: number }) {
               >
                 <div
                   className={
-                    "max-w-[85%] rounded-lg px-4 py-2.5 text-sm leading-relaxed whitespace-pre-wrap " +
+                    "max-w-[85%] rounded-lg px-4 py-2.5 text-sm leading-relaxed " +
                     (m.role === "user"
-                      ? "bg-foreground text-background"
+                      ? "whitespace-pre-wrap bg-foreground text-background"
                       : "bg-muted text-foreground")
                   }
                 >
-                  {m.content || (busy ? "思考中…" : "")}
+                  {m.role === "assistant" ? (
+                    m.content ? (
+                      <Markdown>{m.content}</Markdown>
+                    ) : busy ? (
+                      "思考中…"
+                    ) : (
+                      ""
+                    )
+                  ) : (
+                    m.content
+                  )}
                 </div>
               </div>
             ))}
