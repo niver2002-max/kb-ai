@@ -29,10 +29,12 @@ export const GEMINI_MODEL = "gemini-3.5-flash"
 // 向量模型同样走 Gemini 原生端点
 export const GEMINI_EMBED_MODEL = "gemini-embedding-001"
 
-// 温度固定为 0（按你的要求）。
-// ⚠️ 注意：Google 官方建议 Gemini 3 系列保持 temperature=1.0，设为 0 在复杂推理/数学任务上
-// 可能出现循环或质量下降。若发现异常，把这里改回 1 即可。
-export const TEMPERATURE = 0
+// 温度：可通过 GEMINI_TEMPERATURE 环境变量调节，默认 0（确定性强、适合事实型知识库问答，降低幻觉）。
+// ⚠️ Google 官方建议 Gemini 3 系列复杂推理/数学任务用 temperature=1.0；
+// 若发现循环或推理质量下降，把 GEMINI_TEMPERATURE 设为 1 即可，无需改代码。
+export const TEMPERATURE = Number.isFinite(Number(process.env.GEMINI_TEMPERATURE))
+  ? Number(process.env.GEMINI_TEMPERATURE)
+  : 0
 
 // thinkingLevel：minimal | low | medium(默认) | high。
 // "adaptive" = 不固定档位，交给 Gemini 原生的「动态思考(dynamic thinking)」按问题复杂度自动调节，
@@ -93,7 +95,8 @@ function buildBody(
 }
 
 async function callGenerate(body: Record<string, unknown>): Promise<string> {
-  const res = await fetch(
+  // 带指数退避重试：第三方中转常出现瞬时 503/过载（system_cpu_overloaded），重试可显著提升成功率。
+  const res = await fetchWithRetry(
     `${BASE}/models/${GEMINI_MODEL}:generateContent`,
     {
       method: "POST",
@@ -103,11 +106,8 @@ async function callGenerate(body: Record<string, unknown>): Promise<string> {
       },
       body: JSON.stringify(body),
     },
+    "Gemini generateContent",
   )
-  if (!res.ok) {
-    const detail = await res.text().catch(() => "")
-    throw new Error(`Gemini generateContent 失败 (${res.status}): ${detail.slice(0, 500)}`)
-  }
   // 第三方中转若地址不对，常返回 HTML 页面（200）。提前识别，给出可读报错。
   const text = await res.text()
   const looksLikeHtml = text.trimStart().startsWith("<")

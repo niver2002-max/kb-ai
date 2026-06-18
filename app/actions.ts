@@ -4,6 +4,7 @@ import { scanDirectory, makeWebSource } from "@/lib/kb/scan"
 import { parseFile, fetchWeb, chunkSegments } from "@/lib/kb/parse"
 import { embedSegments, visionExtract } from "@/lib/kb/embed"
 import { geminiJson, geminiContents } from "@/lib/kb/gemini"
+import { mapLimit } from "@/lib/kb/concurrency"
 import {
   readIndex,
   upsertSources,
@@ -68,10 +69,14 @@ export async function screenSources(userPrompt: string) {
   )
   if (candidates.length === 0) return getKbState()
 
-  // 批量交给模型，控制单批数量
+  // 分批交给模型，多批之间并发执行（彼此独立），缩短大批量文件的初筛耗时。
   const batchSize = 40
+  const batches: KbSource[][] = []
   for (let i = 0; i < candidates.length; i += batchSize) {
-    const batch = candidates.slice(i, i + batchSize)
+    batches.push(candidates.slice(i, i + batchSize))
+  }
+
+  await mapLimit(batches, 4, async (batch) => {
     const listing = batch
       .map(
         (s, idx) =>
@@ -115,7 +120,7 @@ export async function screenSources(userPrompt: string) {
         note: item.note,
       })
     }
-  }
+  })
   return getKbState()
 }
 
@@ -138,7 +143,10 @@ export async function buildKb(opts?: {
 
   let processed = 0
   let failed = 0
-  for (const source of targets) {
+  // 受控并发处理多个来源：解析+切块+嵌入相互独立，可并行以大幅缩短整体耗时。
+  // 并发度取自 KB_BUILD_CONCURRENCY（默认 4），避免一次性打爆端点。
+  const concurrency = Number(process.env.KB_BUILD_CONCURRENCY ?? 4) || 4
+  await mapLimit(targets, concurrency, async (source) => {
     try {
       await updateSource(source.id, { status: "parsing" })
       const segments = await parseOne(source)
@@ -147,7 +155,7 @@ export async function buildKb(opts?: {
           status: "skipped",
           note: source.note ?? "无可提取文本",
         })
-        continue
+        return
       }
       const chunks = chunkSegments(segments)
       const embedded = await embedSegments(source.id, chunks)
@@ -166,7 +174,7 @@ export async function buildKb(opts?: {
         error: err instanceof Error ? err.message : String(err),
       })
     }
-  }
+  })
 
   const state = await getKbState()
   return { ...state, processed, failed }

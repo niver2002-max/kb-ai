@@ -16,7 +16,8 @@ export async function POST(req: Request) {
   const query = [...messages].reverse().find((m) => m.role === "user")?.content ?? ""
 
   const index = await readIndex()
-  const hits = query ? await searchChunks(query, index.chunks, 6) : []
+  // topK=8：BM25+MMR 已做多样性去重，更多上下文有助于复杂问题的推理质量
+  const hits = query ? await searchChunks(query, index.chunks, 8) : []
 
   // 组装带来源编号的上下文，便于模型引用
   const sourceById = new Map(index.sources.map((s) => [s.id, s]))
@@ -53,11 +54,24 @@ export async function POST(req: Request) {
   }))
 
   // adaptive 思考 + 原生联网检索（grounding），由模型按需自适应补全
-  const stream = await geminiStream(contents, {
-    system,
-    thinking: "adaptive",
-    ...(webGrounding ? { tools: [{ google_search: {} }] } : {}),
-  })
+  let stream: ReadableStream<Uint8Array>
+  try {
+    stream = await geminiStream(contents, {
+      system,
+      thinking: "adaptive",
+      ...(webGrounding ? { tools: [{ google_search: {} }] } : {}),
+    })
+  } catch (err) {
+    // 重试后仍失败（如中转持续过载）：返回可读提示，避免前端收到不可读的 500 页面。
+    const raw = err instanceof Error ? err.message : String(err)
+    const friendly = /overload|503|cpu/i.test(raw)
+      ? "⚠️ 上游模型端点当前过载（已自动重试多次），请稍候片刻再发送。"
+      : `⚠️ 生成失败：${raw}`
+    return new Response(friendly, {
+      status: 200,
+      headers: { "Content-Type": "text/plain; charset=utf-8", "Cache-Control": "no-cache" },
+    })
+  }
 
   return new Response(stream, {
     headers: {
