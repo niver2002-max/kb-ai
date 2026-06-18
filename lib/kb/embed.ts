@@ -2,14 +2,23 @@ import { promises as fs } from "node:fs"
 import type { KbChunk, KbSource } from "./types"
 import type { ParsedSegment } from "./parse"
 import { geminiEmbedBatch, geminiEmbedOne, geminiParts } from "./gemini"
+import { keywordSearch, tokenize } from "./retrieval"
 
-// 为一组文本片段生成 embedding（Gemini 原生批量向量端点），并组装成 chunk
+// 为一组文本片段生成 embedding（Gemini 原生批量向量端点），并组装成 chunk。
+// 关键容错：若嵌入端点不可用（部分第三方中转不提供向量服务，如持续 503），
+// 不再抛错丢失内容，而是以空向量入库；检索时自动降级为本地关键词检索。
 export async function embedSegments(
   sourceId: string,
   segments: ParsedSegment[],
 ): Promise<KbChunk[]> {
   if (segments.length === 0) return []
-  const embeddings = await geminiEmbedBatch(segments.map((s) => s.text))
+  let embeddings: number[][] = []
+  try {
+    embeddings = await geminiEmbedBatch(segments.map((s) => s.text))
+  } catch (e) {
+    console.log(`[v0] 嵌入不可用，内容以关键词模式入库：${(e as Error).message}`)
+    embeddings = []
+  }
   return segments.map((seg, i) => ({
     id: `${sourceId}-${i}`,
     sourceId,
@@ -50,7 +59,8 @@ function guessMime(ext: string): string {
   if (e === ".gif") return "image/gif"
   if (e === ".webp") return "image/webp"
   if (e === ".bmp") return "image/bmp"
-  if (e === ".tiff") return "image/tiff"
+  if (e === ".tiff" || e === ".tif") return "image/tiff"
+  if (e === ".pdf") return "application/pdf"
   return "image/jpeg"
 }
 
@@ -73,18 +83,73 @@ export interface SearchHit {
   score: number
 }
 
-// 基于余弦相似度的本地向量检索（查询向量用 RETRIEVAL_QUERY 任务类型）
+// 知识库检索：优先语义向量（chunk 有 embedding 时），并对向量候选做 MMR 多样性去重；
+// 若嵌入不可用（chunk.embedding 为空）则自动降级为 BM25 关键词检索（短语加权 + MMR）。
+// 两种模式都在本地完成，无需外部服务即可工作。
 export async function searchChunks(
   query: string,
   chunks: KbChunk[],
-  topK = 6,
+  topK = 8,
 ): Promise<SearchHit[]> {
   if (chunks.length === 0) return []
-  const embedding = await geminiEmbedOne(query, "RETRIEVAL_QUERY")
-  const scored = chunks.map((chunk) => ({
-    chunk,
-    score: cosine(embedding, chunk.embedding),
-  }))
-  scored.sort((a, b) => b.score - a.score)
-  return scored.slice(0, topK)
+  const hasVectors = chunks.some((c) => c.embedding && c.embedding.length > 0)
+
+  if (hasVectors) {
+    try {
+      const embedding = await geminiEmbedOne(query, "RETRIEVAL_QUERY")
+      if (embedding.length > 0) {
+        const scored = chunks
+          .map((chunk) => ({ chunk, score: cosine(embedding, chunk.embedding) }))
+          .sort((a, b) => b.score - a.score)
+        // 取较大候选集再 MMR 去冗余，提升上下文多样性与覆盖
+        return mmrSelectHits(query, scored.slice(0, Math.max(topK * 4, 24)), topK)
+      }
+    } catch (e) {
+      console.log(`[v0] 查询向量化失败，降级 BM25 关键词检索：${(e as Error).message}`)
+    }
+  }
+
+  // BM25 + 短语加权 + MMR 关键词检索
+  const results = keywordSearch(
+    query,
+    chunks.map((c) => c.text),
+    topK,
+  )
+  return results.map((r) => ({ chunk: chunks[r.index], score: r.score }))
+}
+
+// 对已按相关性排序的向量候选做 MMR：在相关性与多样性间平衡，去除近重复块。
+function mmrSelectHits(query: string, ranked: SearchHit[], topK: number): SearchHit[] {
+  if (ranked.length <= topK) return ranked
+  const lambda = 0.7
+  const tokenSets = ranked.map((h) => new Set(tokenize(h.chunk.text)))
+  const maxScore = ranked[0]?.score || 1
+  const selected: number[] = []
+  const remaining = ranked.map((_, i) => i)
+
+  while (selected.length < topK && remaining.length > 0) {
+    let bestPos = -1
+    let bestVal = -Infinity
+    for (let p = 0; p < remaining.length; p++) {
+      const i = remaining[p]
+      const rel = (ranked[i].score || 0) / (maxScore || 1)
+      let maxSim = 0
+      for (const s of selected) {
+        const a = tokenSets[i]
+        const b = tokenSets[s]
+        let inter = 0
+        for (const t of a) if (b.has(t)) inter++
+        const sim = a.size + b.size - inter === 0 ? 0 : inter / (a.size + b.size - inter)
+        maxSim = Math.max(maxSim, sim)
+      }
+      const mmr = lambda * rel - (1 - lambda) * maxSim
+      if (mmr > bestVal) {
+        bestVal = mmr
+        bestPos = p
+      }
+    }
+    if (bestPos === -1) break
+    selected.push(remaining.splice(bestPos, 1)[0])
+  }
+  return selected.map((i) => ranked[i])
 }
