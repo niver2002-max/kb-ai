@@ -2,11 +2,68 @@
 
 import { useEffect, useRef, useState } from "react"
 import { Button } from "@/components/ui/button"
-import { Input } from "@/components/ui/input"
+import { Textarea } from "@/components/ui/textarea"
 import { Badge } from "@/components/ui/badge"
 import { Markdown } from "@/components/kb/markdown"
-import { SendHorizontal, Sparkles, X, AtSign, FileText, Square } from "lucide-react"
+import { SendHorizontal, Sparkles, X, AtSign, FileText, Square, Paperclip, Upload, Loader2 } from "lucide-react"
+import { ingestUploadedFiles, type DroppedFile } from "@/app/actions"
+import type { KbState } from "@/components/kb/knowledge-base"
+import { toast } from "sonner"
 import type { KbMessage } from "@/lib/kb/types"
+
+// 读取浏览器 File 为 base64（不含 data: 前缀）
+function fileToBase64(file: File): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader()
+    reader.onload = () => {
+      const res = reader.result as string
+      const comma = res.indexOf(",")
+      resolve(comma >= 0 ? res.slice(comma + 1) : res)
+    }
+    reader.onerror = reject
+    reader.readAsDataURL(file)
+  })
+}
+
+// 递归读取拖入的目录条目（webkitGetAsEntry），收集所有文件及其相对路径
+async function readEntry(entry: any, prefix: string, out: File[], relPaths: Map<File, string>) {
+  if (entry.isFile) {
+    const file: File = await new Promise((res, rej) => entry.file(res, rej))
+    relPaths.set(file, prefix + entry.name)
+    out.push(file)
+  } else if (entry.isDirectory) {
+    const reader = entry.createReader()
+    // readEntries 需循环读直到返回空
+    const readAll = (): Promise<any[]> =>
+      new Promise((res, rej) => reader.readEntries(res, rej))
+    let batch = await readAll()
+    while (batch.length > 0) {
+      for (const e of batch) await readEntry(e, prefix + entry.name + "/", out, relPaths)
+      batch = await readAll()
+    }
+  }
+}
+
+// 从 DataTransfer 收集所有文件（支持目录递归），返回 {file, relPath}[]
+async function collectDropped(dt: DataTransfer): Promise<Array<{ file: File; relPath: string }>> {
+  const relPaths = new Map<File, string>()
+  const files: File[] = []
+  const items = Array.from(dt.items || [])
+  const entries = items
+    .map((it) => (it.webkitGetAsEntry ? it.webkitGetAsEntry() : null))
+    .filter(Boolean)
+
+  if (entries.length > 0) {
+    for (const entry of entries) await readEntry(entry, "", files, relPaths)
+  } else {
+    // 回退：直接用 files 列表（无目录结构）
+    for (const f of Array.from(dt.files || [])) {
+      relPaths.set(f, f.name)
+      files.push(f)
+    }
+  }
+  return files.map((f) => ({ file: f, relPath: relPaths.get(f) || f.name }))
+}
 
 export interface ChatScope {
   type: "category" | "source"
@@ -30,6 +87,7 @@ export function MainSession({
   onClearScope,
   inspecting = false,
   onBusyChange,
+  onStateChange,
 }: {
   libId: string
   initialMessages: KbMessage[]
@@ -40,6 +98,8 @@ export function MainSession({
   inspecting?: boolean
   // 上报对话是否正在生成（用于禁用「开启巡检」）
   onBusyChange?: (busy: boolean) => void
+  // 拖拽导入后回传最新知识库状态（用于刷新知识树）
+  onStateChange?: (s: KbState) => void
 }) {
   const [input, setInput] = useState("")
   const [messages, setMessages] = useState<UiMessage[]>(
@@ -54,9 +114,67 @@ export function MainSession({
       })),
   )
   const [busy, setBusy] = useState(false)
+  // 拖拽导入：覆盖层显隐、上传进度、已附带文件（@xxx 引用）
+  const [dragOver, setDragOver] = useState(false)
+  const [uploading, setUploading] = useState("")
+  const [attachments, setAttachments] = useState<string[]>([])
+  const dragDepth = useRef(0)
+  const fileInputRef = useRef<HTMLInputElement>(null)
+  const textareaRef = useRef<HTMLTextAreaElement>(null)
   const scrollRef = useRef<HTMLDivElement>(null)
   // 用于「停止」按钮中断当前生成
   const abortRef = useRef<AbortController | null>(null)
+
+  // 把收集到的文件上传入库，并在输入框插入 @文件名 引用
+  async function uploadFiles(picked: Array<{ file: File; relPath: string }>) {
+    if (picked.length === 0 || inspecting) return
+    // 限制单次体积，避免一次性塞入超大目录
+    const MAX_TOTAL = 80 * 1024 * 1024
+    let total = 0
+    for (const p of picked) total += p.file.size
+    if (total > MAX_TOTAL) {
+      toast.error("单次拖入内容过大（>80MB），请分批拖入或用「导入材料」选目录")
+      return
+    }
+    setUploading(`读取 ${picked.length} 个文件…`)
+    try {
+      const payload: DroppedFile[] = []
+      for (const { file, relPath } of picked) {
+        payload.push({ relPath, dataBase64: await fileToBase64(file) })
+      }
+      setUploading(`解析并入库 ${payload.length} 个文件…`)
+      const { imported, failed, state } = await ingestUploadedFiles(libId, payload)
+      onStateChange?.(state)
+      if (imported.length > 0) {
+        // 在输入框插入 @文件名 引用；并记录为附带项展示
+        const mentions = imported.map((n) => `@${n}`)
+        setAttachments((prev) => Array.from(new Set([...prev, ...imported])))
+        setInput((prev) => (prev ? prev.trimEnd() + " " : "") + mentions.join(" ") + " ")
+        textareaRef.current?.focus()
+        toast.success(`已导入 ${imported.length} 个文件到知识库`)
+      }
+      if (failed.length > 0) toast.error(`${failed.length} 个文件导入失败`)
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : "导入失败")
+    } finally {
+      setUploading("")
+    }
+  }
+
+  async function onDrop(e: React.DragEvent) {
+    e.preventDefault()
+    dragDepth.current = 0
+    setDragOver(false)
+    if (inspecting || uploading) return
+    const picked = await collectDropped(e.dataTransfer)
+    await uploadFiles(picked)
+  }
+
+  async function onPickFiles(e: React.ChangeEvent<HTMLInputElement>) {
+    const files = Array.from(e.target.files || [])
+    e.target.value = "" // 允许重复选择同一文件
+    await uploadFiles(files.map((f) => ({ file: f, relPath: f.name })))
+  }
 
   function scrollToBottom() {
     requestAnimationFrame(() => {
@@ -163,7 +281,37 @@ export function MainSession({
   }
 
   return (
-    <div className="flex h-full flex-col">
+    <div
+      className="relative flex h-full flex-col"
+      onDragEnter={(e) => {
+        if (inspecting) return
+        // 仅当拖入的是文件时才显示覆盖层
+        if (Array.from(e.dataTransfer.types).includes("Files")) {
+          e.preventDefault()
+          dragDepth.current++
+          setDragOver(true)
+        }
+      }}
+      onDragOver={(e) => {
+        if (dragOver) e.preventDefault()
+      }}
+      onDragLeave={() => {
+        dragDepth.current = Math.max(0, dragDepth.current - 1)
+        if (dragDepth.current === 0) setDragOver(false)
+      }}
+      onDrop={onDrop}
+    >
+      {/* 拖拽覆盖层：拖文件/目录进来即可导入 */}
+      {dragOver && (
+        <div className="absolute inset-0 z-20 flex flex-col items-center justify-center gap-3 rounded-lg border-2 border-dashed border-primary bg-background/90 backdrop-blur-sm">
+          <Upload className="size-10 text-primary" />
+          <div className="text-center text-sm">
+            <p className="font-medium">松开即可导入到知识库</p>
+            <p className="text-muted-foreground">支持任意文件与整个文件夹，导入后会变成 @ 引用</p>
+          </div>
+        </div>
+      )}
+
       <div
         ref={scrollRef}
         className={
@@ -176,8 +324,8 @@ export function MainSession({
             <Sparkles className="size-8" />
             <div className="max-w-sm text-sm leading-relaxed">
               {chunkCount > 0
-                ? "这是贯穿整个知识库的持久对话，重启后自动恢复。直接提问，或用左侧知识树 @ 某个层级聚焦提问。"
-                : "知识库还没有内容。点右上角加号导入资料，或直接告诉我你想建什么——我可以联网帮你搜集。"}
+                ? "这是贯穿整个知识库的持久对话，重启后自动恢复。直接提问，用左侧知识树 @ 某层级聚焦，或把文件/文件夹拖进来导入。"
+                : "知识库还没有内容。把文件或文件夹直接拖进来导入，点右上角加号，或直接告诉我你想建什么——我可以联网帮你搜集。"}
             </div>
           </div>
         ) : (
@@ -239,7 +387,8 @@ export function MainSession({
         )}
       </div>
 
-      <div className="mx-auto w-full max-w-2xl border-t pt-3">
+      <div className="mx-auto w-full max-w-2xl px-1 pb-5 pt-2">
+        {/* 聚焦范围 */}
         {scope && (
           <div className="mb-2 flex items-center gap-2">
             <Badge variant="outline" className="gap-1">
@@ -256,33 +405,95 @@ export function MainSession({
             </button>
           </div>
         )}
-        <form onSubmit={submit} className="flex items-center gap-2">
-          <Input
+
+        {/* 已附带的拖入文件（@ 引用） */}
+        {attachments.length > 0 && (
+          <div className="mb-2 flex flex-wrap items-center gap-1.5">
+            {attachments.map((name) => (
+              <Badge key={name} variant="secondary" className="gap-1 font-normal">
+                <AtSign className="size-3" />
+                {name}
+                <button
+                  type="button"
+                  aria-label={`移除 ${name}`}
+                  onClick={() => {
+                    setAttachments((prev) => prev.filter((n) => n !== name))
+                    setInput((prev) => prev.replace(`@${name}`, "").replace(/\s{2,}/g, " ").trim())
+                  }}
+                  className="ml-0.5 text-muted-foreground hover:text-foreground"
+                >
+                  <X className="size-3" />
+                </button>
+              </Badge>
+            ))}
+          </div>
+        )}
+
+        {/* 输入区：放大为多行，可拖文件/点附件导入 */}
+        <form
+          onSubmit={submit}
+          className="flex flex-col gap-2 rounded-xl border bg-card p-2.5 shadow-sm focus-within:ring-1 focus-within:ring-ring"
+        >
+          <Textarea
+            ref={textareaRef}
             value={input}
             onChange={(e) => setInput(e.target.value)}
+            onKeyDown={(e) => {
+              // Enter 发送，Shift+Enter 换行
+              if (e.key === "Enter" && !e.shiftKey && !e.nativeEvent.isComposing) {
+                e.preventDefault()
+                void submit(e as unknown as React.FormEvent)
+              }
+            }}
             placeholder={
               inspecting
                 ? "巡检进行中，对话已暂停…"
                 : scope
-                  ? `在「${scope.label}」范围内提问…`
-                  : "向知识库提问…"
+                  ? `在「${scope.label}」范围内提问…（可拖入文件/文件夹导入）`
+                  : "向知识库提问，或把文件、文件夹拖进来导入…"
             }
-            // 生成中输入框仍可编辑（只是不能发送）；仅巡检时整体禁用
             disabled={inspecting}
             aria-label="提问输入框"
+            rows={3}
+            className="min-h-20 resize-none border-0 bg-transparent px-1.5 py-1 shadow-none focus-visible:ring-0"
           />
-          {busy ? (
-            <Button type="button" onClick={stop} size="icon" variant="secondary" aria-label="停止生成">
-              <Square className="size-3.5 fill-current" />
-              <span className="sr-only">停止</span>
+          <div className="flex items-center justify-between gap-2">
+            <Button
+              type="button"
+              variant="ghost"
+              size="sm"
+              className="gap-1.5 text-muted-foreground"
+              disabled={inspecting || !!uploading}
+              onClick={() => fileInputRef.current?.click()}
+            >
+              {uploading ? <Loader2 className="size-4 animate-spin" /> : <Paperclip className="size-4" />}
+              {uploading || "添加文件"}
             </Button>
-          ) : (
-            <Button type="submit" disabled={inspecting || !input.trim()} size="icon">
-              <SendHorizontal className="size-4" />
-              <span className="sr-only">发送</span>
-            </Button>
-          )}
+            {busy ? (
+              <Button type="button" onClick={stop} size="icon" variant="secondary" aria-label="停止生成">
+                <Square className="size-3.5 fill-current" />
+                <span className="sr-only">停止</span>
+              </Button>
+            ) : (
+              <Button type="submit" disabled={inspecting || !input.trim()} size="icon" aria-label="发送">
+                <SendHorizontal className="size-4" />
+                <span className="sr-only">发送</span>
+              </Button>
+            )}
+          </div>
         </form>
+        <p className="mt-1.5 px-1 text-center text-[11px] text-muted-foreground">
+          Enter 发送 · Shift+Enter 换行 · 可把任意文件或文件夹拖进来导入
+        </p>
+
+        {/* 隐藏的多选文件输入（系统原生文件选择） */}
+        <input
+          ref={fileInputRef}
+          type="file"
+          multiple
+          hidden
+          onChange={onPickFiles}
+        />
       </div>
     </div>
   )

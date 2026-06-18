@@ -212,6 +212,93 @@ export async function browseFs(
   }
 }
 
+// 调起操作系统原生选择对话框（本地运行时服务端即用户机器，对话框出现在用户桌面）。
+// Windows 用 PowerShell；macOS 用 osascript；Linux 用 zenity/kdialog。
+// 返回绝对路径；用户取消返回 null；环境不支持时抛错（前端回退应用内浏览弹窗）。
+export async function pickNativePath(
+  mode: "dir" | "file",
+  initialDir?: string,
+): Promise<string | null> {
+  const { spawn } = await import("node:child_process")
+  const os = await import("node:os")
+  const platform = process.platform
+  const start = (initialDir?.trim() || os.homedir()).replace(/"/g, "")
+
+  // 统一执行外部命令，返回 stdout（trim 后）
+  function run(cmd: string, args: string[]): Promise<string> {
+    return new Promise((resolve, reject) => {
+      let out = ""
+      let err = ""
+      let child: import("node:child_process").ChildProcess
+      try {
+        child = spawn(cmd, args, { windowsHide: true })
+      } catch (e) {
+        reject(e)
+        return
+      }
+      child.stdout?.on("data", (d) => (out += d.toString()))
+      child.stderr?.on("data", (d) => (err += d.toString()))
+      child.on("error", reject)
+      child.on("close", (code) => {
+        // 取消（非 0）也按"无输出"处理，由上层判定为取消
+        if (code !== 0 && !out.trim()) {
+          resolve("")
+          return
+        }
+        resolve(out.trim())
+      })
+    })
+  }
+
+  try {
+    if (platform === "win32") {
+      // PowerShell + WinForms，需 STA 线程
+      const ps =
+        mode === "dir"
+          ? `Add-Type -AssemblyName System.Windows.Forms; $d = New-Object System.Windows.Forms.FolderBrowserDialog; $d.SelectedPath = '${start.replace(/'/g, "''")}'; $d.Description = '选择目录'; if ($d.ShowDialog() -eq 'OK') { [Console]::Out.Write($d.SelectedPath) }`
+          : `Add-Type -AssemblyName System.Windows.Forms; $d = New-Object System.Windows.Forms.OpenFileDialog; $d.InitialDirectory = '${start.replace(/'/g, "''")}'; $d.Title = '选择文件'; if ($d.ShowDialog() -eq 'OK') { [Console]::Out.Write($d.FileName) }`
+      const result = await run("powershell.exe", [
+        "-NoProfile",
+        "-STA",
+        "-NonInteractive",
+        "-Command",
+        ps,
+      ])
+      return result.trim() || null
+    }
+
+    if (platform === "darwin") {
+      const script =
+        mode === "dir"
+          ? `set p to choose folder with prompt "选择目录"
+POSIX path of p`
+          : `set p to choose file with prompt "选择文件"
+POSIX path of p`
+      const result = await run("osascript", ["-e", script])
+      return result.trim() || null
+    }
+
+    // Linux：优先 zenity，回退 kdialog
+    const zenityArgs =
+      mode === "dir"
+        ? ["--file-selection", "--directory", `--filename=${start}/`]
+        : ["--file-selection", `--filename=${start}/`]
+    try {
+      const result = await run("zenity", zenityArgs)
+      return result.trim() || null
+    } catch {
+      const kdialogArgs =
+        mode === "dir"
+          ? ["--getexistingdirectory", start]
+          : ["--getopenfilename", start]
+      const result = await run("kdialog", kdialogArgs)
+      return result.trim() || null
+    }
+  } catch {
+    throw new Error("当前环境无法调起系统对话框，请使用应用内浏览选择。")
+  }
+}
+
 // 新建子目录（选目录弹窗里"新建文件夹"用）
 export async function makeDir(parentDir: string, name: string): Promise<string> {
   const pathmod = await import("node:path")
@@ -277,6 +364,63 @@ export async function importSingleFile(libId: string, filePath: string) {
   const source = await scanSingleFile(filePath.trim())
   await upsertSources(libId, [source])
   return { source, state: await getKbState(libId) }
+}
+
+// 拖拽上传入库：浏览器把文件内容（base64）传上来，写入库的 imports/dropped/ 后
+// 扫描归类 → 解析 → 切块 → 嵌入入库。relPath 保留拖入目录的层级结构。
+export interface DroppedFile {
+  relPath: string // 相对路径（拖入目录时含子层级），如 "docs/spec.pdf"
+  dataBase64: string // 文件内容（base64，不含 data: 前缀）
+}
+
+export async function ingestUploadedFiles(
+  libId: string,
+  files: DroppedFile[],
+): Promise<{ imported: string[]; failed: string[]; state: Awaited<ReturnType<typeof getKbState>> }> {
+  if (!files?.length) throw new Error("没有要导入的文件")
+  const lib = await getLibrary(libId)
+  if (!lib) throw new Error("知识库不存在")
+  const pathmod = await import("node:path")
+  const fsmod = await import("node:fs/promises")
+
+  const baseDir = pathmod.join(lib.rootDir, "imports", "dropped")
+  await fsmod.mkdir(baseDir, { recursive: true })
+
+  const importedIds: string[] = []
+  const imported: string[] = []
+  const failed: string[] = []
+
+  for (const f of files) {
+    try {
+      // 清洗相对路径，防止越界写入
+      const safeRel = f.relPath
+        .replace(/\\/g, "/")
+        .split("/")
+        .map((seg) => seg.replace(/[<>:"|?*\u0000-\u001f]/g, "_").trim())
+        .filter((seg) => seg && seg !== "." && seg !== "..")
+        .join("/")
+      if (!safeRel) {
+        failed.push(f.relPath)
+        continue
+      }
+      const dest = pathmod.join(baseDir, safeRel)
+      await fsmod.mkdir(pathmod.dirname(dest), { recursive: true })
+      await fsmod.writeFile(dest, Buffer.from(f.dataBase64, "base64"))
+
+      const source = await scanSingleFile(dest)
+      await upsertSources(libId, [source])
+      importedIds.push(source.id)
+      imported.push(source.name)
+    } catch {
+      failed.push(f.relPath)
+    }
+  }
+
+  // 一次性入库（解析+切块+嵌入）
+  if (importedIds.length > 0) {
+    await buildKb(libId, { includeIds: importedIds })
+  }
+  return { imported, failed, state: await getKbState(libId) }
 }
 
 // 添加网页来源

@@ -1,7 +1,7 @@
 "use client"
 
 import { useState, useEffect, useCallback } from "react"
-import { browseFs, makeDir, type FsEntry } from "@/app/actions"
+import { browseFs, makeDir, pickNativePath, type FsEntry } from "@/app/actions"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import {
@@ -21,6 +21,7 @@ import {
   FolderPlus,
   Check,
   CornerDownRight,
+  MonitorUp,
 } from "lucide-react"
 
 // 应用内文件系统选择弹窗：逐层浏览服务器目录，返回真实绝对路径。
@@ -45,6 +46,24 @@ export function PathPicker({
   const [loading, setLoading] = useState(false)
   const [creating, setCreating] = useState(false)
   const [newName, setNewName] = useState("")
+  const [nativeBusy, setNativeBusy] = useState(false)
+
+  // 调起系统原生对话框（Win/macOS/Linux）。成功即返回选中路径并关闭弹窗；
+  // 取消则保持应用内浏览；环境不支持则提示改用应用内浏览。
+  async function pickNative() {
+    setNativeBusy(true)
+    try {
+      const p = await pickNativePath(mode, cwd || initialDir)
+      if (p) {
+        onSelect(p)
+        onOpenChange(false)
+      }
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : "无法调起系统对话框")
+    } finally {
+      setNativeBusy(false)
+    }
+  }
 
   const load = useCallback(
     async (dir?: string) => {
@@ -114,10 +133,21 @@ export function PathPicker({
           <DialogTitle>{mode === "dir" ? "选择目录" : "选择文件"}</DialogTitle>
           <DialogDescription>
             {mode === "dir"
-              ? "浏览并进入想要使用的目录，点「选择此目录」确认。"
-              : "浏览目录并点选一个文件，点「选择此文件」确认。"}
+              ? "推荐用系统对话框选择；也可在下方应用内浏览，点「选择此目录」确认。"
+              : "推荐用系统对话框选择；也可在下方应用内浏览，点「选择此文件」确认。"}
           </DialogDescription>
         </DialogHeader>
+
+        {/* 系统原生对话框（更顺手，尤其 Windows） */}
+        <Button onClick={pickNative} disabled={nativeBusy} className="w-full gap-1.5">
+          {nativeBusy ? <Loader2 className="size-4 animate-spin" /> : <MonitorUp className="size-4" />}
+          {nativeBusy ? "等待系统对话框…" : mode === "dir" ? "用系统对话框选择目录" : "用系统对话框选择文件"}
+        </Button>
+        <div className="flex items-center gap-2 text-[11px] text-muted-foreground">
+          <span className="h-px flex-1 bg-border" />
+          或在应用内浏览
+          <span className="h-px flex-1 bg-border" />
+        </div>
 
         {/* 当前路径 + 上级 */}
         <div className="flex items-center gap-2">

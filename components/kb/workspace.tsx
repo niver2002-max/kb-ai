@@ -90,6 +90,7 @@ export function Workspace({
             onClearScope={() => setScope(null)}
             inspecting={inspecting}
             onBusyChange={setChatBusy}
+            onStateChange={setState}
           />
         </main>
       </div>
