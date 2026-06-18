@@ -8,10 +8,21 @@
 //   · 鉴权头：  x-goog-api-key: GEMINI_API_KEY
 //
 // 第三方端点配置：在 .env.local 设置 GEMINI_BASE_URL 指向你的中转地址，例如：
-//   GEMINI_BASE_URL=https://你的中转域名/v1beta
-// 不设置时回退到 Google 官方端点。末尾多余的斜杠会被自动去除。
+//   GEMINI_BASE_URL=https://你的中转域名/v1beta  （也可只填域名，会自动补 /v1beta）
+// 不设置时回退到 Google 官方端点。
 const DEFAULT_BASE = "https://generativelanguage.googleapis.com/v1beta"
-const BASE = (process.env.GEMINI_BASE_URL || DEFAULT_BASE).replace(/\/+$/, "")
+
+function normalizeBase(raw: string): string {
+  let b = raw.trim().replace(/\/+$/, "") // 去掉末尾斜杠
+  // Gemini 原生协议要求带版本路径。若用户只填了域名（无 /v1beta 或 /v1），自动补 /v1beta，
+  // 否则请求会打到中转站点的网页路由，返回 HTML 而非 JSON。
+  if (!/\/v1beta$|\/v1$|\/v1beta\/|\/v1\//.test(b)) {
+    b = `${b}/v1beta`
+  }
+  return b
+}
+
+const BASE = normalizeBase(process.env.GEMINI_BASE_URL || DEFAULT_BASE)
 
 // 仅使用 Gemini 3.5 Flash 原生端点（非 chat 接口）
 export const GEMINI_MODEL = "gemini-3.5-flash"
@@ -55,6 +66,8 @@ interface GenOpts {
   thinking?: ThinkingLevel
   // 结构化输出：传入 Gemini OpenAPI 风格 schema（type 用大写枚举）
   responseSchema?: Record<string, unknown>
+  // Gemini 原生工具，例如 [{ url_context: {} }]（抓网页）、[{ google_search: {} }]（联网检索）
+  tools?: Record<string, unknown>[]
 }
 
 function buildBody(
@@ -64,11 +77,15 @@ function buildBody(
   const generationConfig: Record<string, unknown> = { temperature: TEMPERATURE }
   const tc = thinkingConfig(opts.thinking ?? "adaptive")
   if (tc) generationConfig.thinkingConfig = tc
+  // 注意：responseSchema（结构化输出）与 tools（工具调用）互斥，不要同时传。
   if (opts.responseSchema) {
     generationConfig.responseMimeType = "application/json"
     generationConfig.responseSchema = opts.responseSchema
   }
   const body: Record<string, unknown> = { contents, generationConfig }
+  if (opts.tools && opts.tools.length > 0) {
+    body.tools = opts.tools
+  }
   if (opts.system) {
     body.systemInstruction = { parts: [{ text: opts.system }] }
   }
@@ -91,8 +108,22 @@ async function callGenerate(body: Record<string, unknown>): Promise<string> {
     const detail = await res.text().catch(() => "")
     throw new Error(`Gemini generateContent 失败 (${res.status}): ${detail.slice(0, 500)}`)
   }
-  const json = (await res.json()) as {
+  // 第三方中转若地址不对，常返回 HTML 页面（200）。提前识别，给出可读报错。
+  const text = await res.text()
+  const looksLikeHtml = text.trimStart().startsWith("<")
+  if (looksLikeHtml) {
+    throw new Error(
+      `端点返回了 HTML 而非 JSON，说明 GEMINI_BASE_URL 路径不对（当前实际请求：${BASE}/models/${GEMINI_MODEL}）。` +
+        `请确认中转地址正确，通常应形如 https://域名/v1beta。返回片段：${text.slice(0, 120)}`,
+    )
+  }
+  let json: {
     candidates?: Array<{ content?: { parts?: Array<{ text?: string; thought?: boolean }> } }>
+  }
+  try {
+    json = JSON.parse(text)
+  } catch {
+    throw new Error(`端点返回了无法解析的内容：${text.slice(0, 200)}`)
   }
   const parts = json.candidates?.[0]?.content?.parts ?? []
   // 跳过 thought 摘要，只取正式回答文本
@@ -114,6 +145,16 @@ export async function geminiParts(parts: GenPart[], opts: GenOpts = {}): Promise
   return callGenerate(body)
 }
 
+// 多轮对话（非流式）——直接走 generateContent，对第三方中转兼容性最好。
+// 返回完整回答文本（已过滤 thought 摘要）。
+export async function geminiContents(
+  contents: Array<{ role: string; parts: GenPart[] }>,
+  opts: GenOpts = {},
+): Promise<string> {
+  const body = buildBody(contents, opts)
+  return callGenerate(body)
+}
+
 // 结构化 JSON 生成（带 schema），自动解析为对象
 export async function geminiJson<T>(
   prompt: string,
@@ -124,68 +165,112 @@ export async function geminiJson<T>(
   return JSON.parse(raw) as T
 }
 
-// 流式生成纯文本：返回一个 ReadableStream<Uint8Array>（已解码为纯文本增量），
-// 供路由直接以 text/plain 流式返回给前端。
+// 把一段完整文本按字符切片写入流，模拟打字机效果（非流式降级路径用）。
+function sliceToStream(full: string): ReadableStream<Uint8Array> {
+  const encoder = new TextEncoder()
+  const STEP = 2
+  let i = 0
+  const chars = Array.from(full)
+  return new ReadableStream<Uint8Array>({
+    async pull(controller) {
+      if (i >= chars.length) {
+        controller.close()
+        return
+      }
+      controller.enqueue(encoder.encode(chars.slice(i, i + STEP).join("")))
+      i += STEP
+      await new Promise((r) => setTimeout(r, 12))
+    },
+  })
+}
+
+// 对话输出：优先尝试真·SSE 流式（streamGenerateContent?alt=sse），
+// 若中转不支持（请求失败 / 首块是 HTML / 整流无文本产出），自动降级为非流式 generateContent + 切片。
+// 用环境变量 GEMINI_STREAM=false 可强制只走非流式。
 export async function geminiStream(
   contents: Array<{ role: string; parts: GenPart[] }>,
   opts: GenOpts = {},
 ): Promise<ReadableStream<Uint8Array>> {
-  const body = buildBody(contents, opts)
-  const res = await fetch(
-    `${BASE}/models/${GEMINI_MODEL}:streamGenerateContent?alt=sse`,
-    {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "x-goog-api-key": getApiKey(),
-      },
-      body: JSON.stringify(body),
-    },
-  )
-  if (!res.ok || !res.body) {
-    const detail = await res.text().catch(() => "")
-    throw new Error(`Gemini streamGenerateContent 失败 (${res.status}): ${detail.slice(0, 500)}`)
+  const streamEnabled = (process.env.GEMINI_STREAM ?? "true").toLowerCase() !== "false"
+  if (!streamEnabled) {
+    console.log("[v0] GEMINI_STREAM=false，直接走非流式")
+    return sliceToStream(await geminiContents(contents, opts))
   }
 
-  const upstream = res.body.getReader()
+  const body = buildBody(contents, opts)
+  let res: Response
+  try {
+    res = await fetch(`${BASE}/models/${GEMINI_MODEL}:streamGenerateContent?alt=sse`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "x-goog-api-key": getApiKey() },
+      body: JSON.stringify(body),
+    })
+  } catch (e) {
+    console.log("[v0] 流式请求异常，降级非流式:", (e as Error).message)
+    return sliceToStream(await geminiContents(contents, opts))
+  }
+
+  if (!res.ok || !res.body) {
+    console.log(`[v0] 流式响应不可用 (status=${res.status})，降级非流式`)
+    return sliceToStream(await geminiContents(contents, opts))
+  }
+
+  // 预读首块，判断是否为合法 SSE。若是 HTML 或非 data: 帧，则降级。
+  const reader = res.body.getReader()
   const decoder = new TextDecoder()
+  const first = await reader.read()
+  const firstText = first.value ? decoder.decode(first.value, { stream: true }) : ""
+  if (firstText.trimStart().startsWith("<") || !firstText.includes("data:")) {
+    console.log("[v0] 首块非 SSE 格式，降级非流式。片段:", JSON.stringify(firstText.slice(0, 120)))
+    reader.cancel().catch(() => {})
+    return sliceToStream(await geminiContents(contents, opts))
+  }
+
+  console.log("[v0] 走真·SSE 流式")
   const encoder = new TextEncoder()
-  let buffer = ""
+  let buffer = firstText
+  let emitted = false
+
+  function drain(controller: ReadableStreamDefaultController<Uint8Array>) {
+    const lines = buffer.split("\n")
+    buffer = lines.pop() ?? ""
+    for (const line of lines) {
+      const t = line.trim()
+      if (!t.startsWith("data:")) continue
+      const data = t.slice(5).trim()
+      if (!data || data === "[DONE]") continue
+      try {
+        const chunk = JSON.parse(data) as {
+          candidates?: Array<{ content?: { parts?: Array<{ text?: string; thought?: boolean }> } }>
+        }
+        for (const p of chunk.candidates?.[0]?.content?.parts ?? []) {
+          if (!p.thought && typeof p.text === "string" && p.text) {
+            emitted = true
+            controller.enqueue(encoder.encode(p.text))
+          }
+        }
+      } catch {
+        // 跳过不完整片段
+      }
+    }
+  }
 
   return new ReadableStream<Uint8Array>({
     async pull(controller) {
-      const { done, value } = await upstream.read()
+      // 先冲掉首块里已就绪的内容
+      if (buffer.includes("\n")) drain(controller)
+      const { done, value } = await reader.read()
       if (done) {
+        if (buffer.trim()) drain(controller)
+        if (!emitted) console.log("[v0] 流结束但无文本产出")
         controller.close()
         return
       }
       buffer += decoder.decode(value, { stream: true })
-      const lines = buffer.split("\n")
-      buffer = lines.pop() ?? ""
-      for (const line of lines) {
-        const trimmed = line.trim()
-        if (!trimmed.startsWith("data:")) continue
-        const data = trimmed.slice(5).trim()
-        if (!data || data === "[DONE]") continue
-        try {
-          const chunk = JSON.parse(data) as {
-            candidates?: Array<{
-              content?: { parts?: Array<{ text?: string; thought?: boolean }> }
-            }>
-          }
-          const parts = chunk.candidates?.[0]?.content?.parts ?? []
-          for (const p of parts) {
-            if (!p.thought && typeof p.text === "string" && p.text) {
-              controller.enqueue(encoder.encode(p.text))
-            }
-          }
-        } catch {
-          // 跳过不完整/无法解析的 SSE 片段
-        }
-      }
+      drain(controller)
     },
     cancel() {
-      void upstream.cancel()
+      reader.cancel().catch(() => {})
     },
   })
 }
