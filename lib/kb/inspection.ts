@@ -16,6 +16,7 @@ import { getLibrary, patchLibrary, listLibraries } from "./library"
 import { readIndex, writeIndex, updateSource } from "./store"
 import { geminiJson, geminiText, geminiSearch, geminiUrlContext, geminiEmbedBatch } from "./gemini"
 import { getSettings } from "./settings"
+import { evalRetrieval } from "./eval"
 
 // 硬性轮次上限（兜底，防极端死循环；正常由 pro 判定 done 停止）
 const MAX_ROUNDS = 50
@@ -106,6 +107,14 @@ async function buildSnapshot(lib: KbLibrary): Promise<string> {
     .map((h) => `· 第${h.round}轮 [${h.action}] 完整度${h.completeness} — ${h.result}`)
     .join("\n")
 
+  // 客观检索评估（若已跑过）——把主观完整度锚定到可量化指标上
+  const ev = insp.lastEval
+  const evalLine = ev
+    ? `客观检索评估：检索得分 ${ev.retrievalScore}/100，答案忠实度 ${ev.faithfulnessScore}/100` +
+      (ev.weakTopics.length ? `；薄弱点：${ev.weakTopics.join("；")}` : "") +
+      `（${new Date(ev.at).toLocaleString()}）`
+    : "客观检索评估：尚未评估（可执行 eval 动作获取真实检索质量分）"
+
   return [
     `知识库标题：${lib.title}`,
     `面向/用途：${lib.audience || "（未填写）"}`,
@@ -113,6 +122,7 @@ async function buildSnapshot(lib: KbLibrary): Promise<string> {
     `片段总数：${index.chunks.length}，缺向量片段：${missingEmbed}`,
     `分类：${cats}`,
     `已有笔记文件（${notesList.length}）：${notesList.slice(0, 60).join("、") || "（无）"}`,
+    evalLine,
     `资料清单：\n${inv || "（暂无来源）"}`,
     recent ? `最近巡检动作：\n${recent}` : "",
   ]
@@ -137,7 +147,7 @@ const DECISION_SCHEMA = {
     done: { type: "BOOLEAN", description: "是否已无明显可迭代之处" },
     action: {
       type: "STRING",
-      enum: ["notes", "gaps", "crawl", "reindex", "none"],
+      enum: ["notes", "gaps", "crawl", "reindex", "eval", "none"],
       description: "本轮应执行的动作",
     },
     target: { type: "STRING", description: "动作目标：缺口主题词或要抓取的网址（可空）" },
@@ -157,9 +167,12 @@ async function decide(lib: KbLibrary): Promise<Decision> {
     `- gaps：找出知识缺口并联网检索补充（target 填最该补的主题词）\n` +
     `- crawl：抓取某个具体网页/在线资料入库（target 填网址或精确资料主题）\n` +
     `- reindex：重建索引/去重/补嵌入（资料动过后整理）\n` +
+    `- eval：跑客观检索评估（生成测试问题→真实检索→裁判打分），得到可量化的检索得分与薄弱点\n` +
     `- none：本轮无需动作（通常 done=true 时）\n\n` +
     `判断原则：优先把已有资料的摘要补全，再补缺口，再抓取外部资料，最后整理索引。\n` +
-    `当知识库对其目标用途已足够完整、再迭代收益很低时，done=true。`
+    `重要：在判定 done 之前，至少应跑过一次 eval 用客观检索得分佐证；` +
+    `若客观检索得分偏低或存在薄弱点，应据此继续补强而非草率收尾。\n` +
+    `当知识库对其目标用途已足够完整、且客观检索得分高、再迭代收益很低时，done=true。`
   return geminiJson<Decision>(prompt, DECISION_SCHEMA, {
     model: inspectModel(),
     thinking: "adaptive",
@@ -286,6 +299,13 @@ async function execReindex(lib: KbLibrary): Promise<string> {
   return `补嵌入 ${embedded} 片段，去重 ${removed} 片段`
 }
 
+// 跑客观检索评估，并把报告持久化进巡检状态（供下一轮决策与 UI 展示）
+async function execEval(lib: KbLibrary): Promise<string> {
+  const report = await evalRetrieval(lib, { n: 6 })
+  await patchInspection(lib.id, { lastEval: report })
+  return report.summary
+}
+
 async function execAction(lib: KbLibrary, action: InspectionAction, target?: string): Promise<string> {
   switch (action) {
     case "notes":
@@ -296,6 +316,8 @@ async function execAction(lib: KbLibrary, action: InspectionAction, target?: str
       return execCrawl(lib, target)
     case "reindex":
       return execReindex(lib)
+    case "eval":
+      return execEval(lib)
     default:
       return "本轮无动作"
   }
@@ -307,9 +329,14 @@ const runningLoops = new Set<string>()
 
 function actionLabel(a: InspectionAction): string {
   return (
-    { notes: "补全摘要笔记", gaps: "查找并补充知识缺口", crawl: "抓取在线资料", reindex: "重建索引", none: "评估中" }[
-      a
-    ] ?? "巡检中"
+    {
+      notes: "补全摘要笔记",
+      gaps: "查找并补充知识缺口",
+      crawl: "抓取在线资料",
+      reindex: "重建索引",
+      eval: "评估检索质量",
+      none: "评估中",
+    }[a] ?? "巡检中"
   )
 }
 

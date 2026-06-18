@@ -185,7 +185,26 @@ export type InspectionAction =
   | "gaps" // 找知识缺口并联网检索补充
   | "crawl" // 自动抓取具体网页/资料入库
   | "reindex" // 重建索引 / 去重 / 补嵌入
+  | "eval" // 跑检索质量评估（生成测试问题集→真实检索→裁判打分），产出客观指标
   | "none" // 无需动作（通常伴随 done）
+
+// 一道评估测试问题及其检索质量评判
+export interface EvalCase {
+  question: string
+  retrievalScore: number // 0-10：检索到的上下文能多大程度支撑回答
+  faithfulnessScore: number // 0-10：基于该上下文的答案忠实度（无幻觉）
+  missing: string // 评判指出缺失/薄弱之处（可空）
+}
+
+// 一次检索质量评估报告
+export interface EvalReport {
+  retrievalScore: number // 0-100 聚合检索得分
+  faithfulnessScore: number // 0-100 聚合忠实度
+  cases: EvalCase[]
+  weakTopics: string[] // 表现薄弱、值得补强的主题
+  summary: string
+  at: number
+}
 
 // 一轮巡检日志
 export interface InspectionRound {
@@ -208,6 +227,7 @@ export interface InspectionState {
   done: boolean // pro 判定已无明显可迭代之处
   stopRequested: boolean // 用户请求结束
   running: boolean // 引擎是否正在跑某一轮（防重入）
+  lastEval?: EvalReport // 最近一次检索质量评估（客观指标，供 pro 决策与 UI 展示）
   startedAt?: number
   finishedAt?: number
   error?: string

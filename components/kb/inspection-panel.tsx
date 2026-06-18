@@ -116,6 +116,18 @@ export function InspectionPanel({
 
           <p className="text-xs leading-relaxed text-muted-foreground">{insp.currentAction || "准备中…"}</p>
 
+          {/* 客观检索评估指标（跑过 eval 后展示） */}
+          {insp.lastEval && (
+            <div className="flex flex-wrap items-center gap-3 rounded-md bg-background/60 px-3 py-1.5 text-xs">
+              <span className="text-muted-foreground">客观评估</span>
+              <span className="font-mono">{`检索 ${insp.lastEval.retrievalScore}/100`}</span>
+              <span className="font-mono">{`忠实度 ${insp.lastEval.faithfulnessScore}/100`}</span>
+              {insp.lastEval.weakTopics.length > 0 && (
+                <span className="text-muted-foreground">{`薄弱：${insp.lastEval.weakTopics.length} 项`}</span>
+              )}
+            </div>
+          )}
+
           {insp.lastReport && (
             <details className="rounded-md bg-background/60 px-3 py-2 text-xs">
               <summary className="cursor-pointer select-none text-muted-foreground">最新巡检报告</summary>

@@ -38,8 +38,15 @@ export async function POST(req: Request) {
   await compressIfNeeded(libId)
   const session = await readSession(libId)
 
-  // 3) scope-aware RAG 检索
-  const { context, citations } = await retrieveContext(libId, message, scope ?? null, 8)
+  // 3) scope-aware RAG 检索（混合检索流水线，传入近期历史帮助解析指代）
+  const recentHistory = session.messages
+    .filter((m) => m.role !== "system")
+    .slice(-5, -1)
+    .map((m) => `${m.role === "user" ? "用户" : "助手"}：${m.content.slice(0, 200)}`)
+    .join("\n")
+  const { context, citations } = await retrieveContext(libId, message, scope ?? null, 8, {
+    history: recentHistory,
+  })
 
   // 4) 组装上下文消息：[摘要] + 最近若干轮原文（已含刚写入的用户消息）
   const history = buildContextMessages(session)
