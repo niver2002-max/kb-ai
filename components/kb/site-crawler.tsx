@@ -10,7 +10,6 @@ import {
   getDownloadManifest,
   setCrawlLinkPicked,
   rescanDownloads,
-  loginCrawlSite,
 } from "@/app/actions"
 import type { KbState } from "@/components/kb/knowledge-base"
 import type { KbCrawlSite, KbCrawlLink, LinkAction } from "@/lib/kb/types"
@@ -66,8 +65,6 @@ export function SiteCrawler({
   const [site, setSite] = useState<KbCrawlSite | null>(null)
   const [pending, startTransition] = useTransition()
   const [busyLabel, setBusyLabel] = useState("")
-  const [loginEmail, setLoginEmail] = useState("")
-  const [loginPassword, setLoginPassword] = useState("")
 
   const links = site?.links ?? []
   const fetchable = links.filter((l) => l.action === "fetch")
@@ -75,8 +72,8 @@ export function SiteCrawler({
   const manualDl = links.filter((l) => l.action === "manual_download")
   const traverse = links.filter((l) => l.action === "traverse")
 
-  // 步骤一：分诊（快速）。识别站点类型/是否需登录后立即反馈；
-  // 开放站点直接继续枚举，需登录站点则停下等用户先登录。
+  // 分诊（快速）后直接枚举筛选。是否需登录只影响"下载"环节（受保护文件走浏览器登录后批量下载），
+  // 不影响枚举：文件清单通常无需登录即可列出。
   function runCrawl(targetUrl?: string) {
     const u = (targetUrl ?? url).trim()
     if (!/^https?:\/\//i.test(u)) {
@@ -90,12 +87,6 @@ export function SiteCrawler({
         const classified = await classifyOnly(u)
         setSite(classified)
         toast.success(`分诊完成：${SITE_KIND_LABEL[classified.siteKind]}${classified.requiresLogin ? "（需登录）" : ""}`)
-        // 需登录站点：先停下，等用户登录后再枚举（登录后才看得到完整清单）
-        if (classified.requiresLogin && !classified.loggedIn) {
-          setBusyLabel("")
-          return
-        }
-        // 开放站点：直接枚举并筛选
         setBusyLabel("遍历站点并按目标筛选中…")
         const result = await enumerateAndSelect(classified.id, prompt.trim())
         if (result) setSite(result)
@@ -108,7 +99,7 @@ export function SiteCrawler({
     })
   }
 
-  // 手动触发枚举（需登录站点登录后，或用户想跳过登录直接枚举开放部分时）
+  // 手动触发枚举（用户调整提示词后想重新筛选时）
   function runEnumerate() {
     if (!site) return
     setBusyLabel("遍历站点并按目标筛选中…")
@@ -119,33 +110,6 @@ export function SiteCrawler({
         toast.success(`发现 ${result?.links.length ?? 0} 条相关链接`)
       } catch (e) {
         toast.error(e instanceof Error ? e.message : "枚举失败")
-      } finally {
-        setBusyLabel("")
-      }
-    })
-  }
-
-  // 服务端登录（账号密码）→ 登录成功后自动重新遍历，需登录文件转为服务端可下载
-  function runLogin() {
-    if (!site) return
-    setBusyLabel("服务端登录中…")
-    startTransition(async () => {
-      try {
-        const r = await loginCrawlSite(site.id, loginEmail.trim(), loginPassword)
-        if (!r.ok) {
-          toast.error(r.message)
-          if (r.site) setSite(r.site)
-          setBusyLabel("")
-          return
-        }
-        if (r.site) setSite(r.site)
-        toast.success(r.message)
-        setBusyLabel("登录成功，遍历站点中…")
-        const updated = await enumerateAndSelect(site.id, prompt.trim())
-        if (updated) setSite(updated)
-        toast.success("已用登录态枚举，受保护文件现可服务端下载")
-      } catch (e) {
-        toast.error(e instanceof Error ? e.message : "登录失败")
       } finally {
         setBusyLabel("")
       }
@@ -378,59 +342,35 @@ export function SiteCrawler({
             </Button>
           </div>
 
-          {site.requiresLogin && (
-            <div className="flex flex-col gap-3 rounded-md border border-amber-500/30 bg-amber-500/5 p-4">
+          {site.requiresLogin && manualDl.length > 0 && (
+            <div className="flex flex-col gap-2 rounded-md border border-amber-500/30 bg-amber-500/5 p-4">
               <div className="flex items-center gap-2 text-sm font-medium text-amber-700 dark:text-amber-300">
                 <LogIn className="size-4" />
-                {site.loggedIn ? "已登录该站点" : "该站需要登录后才能下载受保护文件"}
+                该站受保护文件需登录后下载
               </div>
-              {!site.loggedIn && (
-                <>
-                  <p className="text-xs leading-relaxed text-muted-foreground">
-                    在服务端登录该网站（账号密码由 AI 自动识别表单字段后提交），登录态保留在本次运行内，
-                    之后受保护文件可由服务端直接下载到 <code className="font-mono">downloads/</code>。留空则使用环境变量中的默认账号。
-                  </p>
-                  <div className="flex flex-col gap-2 sm:flex-row">
-                    <Input
-                      placeholder="账号 / 邮箱"
-                      value={loginEmail}
-                      onChange={(e) => setLoginEmail(e.target.value)}
-                      disabled={pending}
-                      className="sm:max-w-[220px]"
-                    />
-                    <Input
-                      type="password"
-                      placeholder="密码"
-                      value={loginPassword}
-                      onChange={(e) => setLoginPassword(e.target.value)}
-                      disabled={pending}
-                      className="sm:max-w-[220px]"
-                    />
-                    <Button onClick={runLogin} disabled={pending} size="sm" className="gap-1.5">
-                      <LogIn className="size-4" />
-                      登录并遍历
-                    </Button>
-                    <Button onClick={runEnumerate} disabled={pending} size="sm" variant="outline">
-                      跳过登录，仅枚举公开部分
-                    </Button>
-                  </div>
-                </>
-              )}
-              {manualDl.length > 0 && (
-                <p className="text-xs leading-relaxed text-muted-foreground">
-                  也可在浏览器<strong>新标签页登录该网站</strong>后，点下方「一键批量下载到项目」，
-                  浏览器用同域登录态把文件写入 <code className="font-mono">downloads/</code>（被 CORS 拦截时降级为逐个下载）。
-                </p>
-              )}
+              <p className="text-xs leading-relaxed text-muted-foreground">
+                请先在浏览器<strong>新标签页登录该网站</strong>（同一浏览器登录态自动共享），登录后回到这里点
+                「<strong>一键批量下载到项目</strong>」。浏览器会用你的登录态把勾选的文件写入项目
+                <code className="font-mono"> downloads/</code> 目录，无需逐个点击、无需复制 Cookie。
+              </p>
+              <a
+                href={site.loginUrl || site.rootUrl}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="inline-flex w-fit items-center gap-1.5 text-xs font-medium text-amber-700 underline underline-offset-2 dark:text-amber-300"
+              >
+                <ExternalLink className="size-3" />
+                打开网站登录
+              </a>
             </div>
           )}
 
-          {/* 已分诊但尚未枚举（需登录站点登录后会自动枚举；这里兜底提供手动触发） */}
-          {links.length === 0 && !site.requiresLogin && !busyLabel && (
+          {/* 已分诊但尚未枚举（兜底手动触发） */}
+          {links.length === 0 && !busyLabel && (
             <div className="rounded-md border border-border bg-muted/30 px-4 py-3 text-xs text-muted-foreground">
-              尚未枚举链接。
+              尚未枚举到链接。
               <Button onClick={runEnumerate} disabled={pending} size="sm" variant="link" className="h-auto px-1 py-0">
-                点此遍历并筛选
+                点此重新遍历并筛选
               </Button>
             </div>
           )}

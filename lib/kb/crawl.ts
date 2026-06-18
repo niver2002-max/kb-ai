@@ -56,11 +56,6 @@ function cookieHeader(url: string): string {
   return cookieJar.get(hostOf(url)) || ""
 }
 
-// 是否已对该 host 登录（jar 里有 cookie）
-export function isLoggedIn(url: string): boolean {
-  return !!cookieJar.get(hostOf(url))
-}
-
 function rid(prefix: string): string {
   return `${prefix}-${Math.random().toString(36).slice(2, 9)}`
 }
@@ -102,114 +97,6 @@ async function rawFetch(
     return { ok: false, status: 0, contentType: "", body: "", finalUrl: url }
   } finally {
     clearTimeout(t)
-  }
-}
-
-// 发送 application/x-www-form-urlencoded POST（带 cookie jar，捕获 Set-Cookie）。
-async function rawPost(
-  url: string,
-  form: Record<string, string>,
-  referer?: string,
-  timeoutMs = 20000,
-): Promise<{ ok: boolean; status: number; body: string; finalUrl: string }> {
-  const ctrl = new AbortController()
-  const t = setTimeout(() => ctrl.abort(), timeoutMs)
-  try {
-    const cookie = cookieHeader(url)
-    const res = await fetch(url, {
-      method: "POST",
-      headers: {
-        "User-Agent": UA,
-        "Content-Type": "application/x-www-form-urlencoded",
-        ...(cookie ? { Cookie: cookie } : {}),
-        ...(referer ? { Referer: referer } : {}),
-      },
-      body: new URLSearchParams(form).toString(),
-      redirect: "follow",
-      signal: ctrl.signal,
-    })
-    const setCookies = res.headers.getSetCookie?.() ?? []
-    if (setCookies.length) storeCookies(url, setCookies)
-    const body = await res.text().catch(() => "")
-    return { ok: res.ok, status: res.status, body, finalUrl: res.url }
-  } catch {
-    return { ok: false, status: 0, body: "", finalUrl: url }
-  } finally {
-    clearTimeout(t)
-  }
-}
-
-// 提取 HTML 中所有 <input>（含 name/value/type），用于补全登录表单的隐藏字段。
-function extractInputs(html: string): Array<{ name: string; value: string; type: string }> {
-  const out: Array<{ name: string; value: string; type: string }> = []
-  for (const m of html.matchAll(/<input\b[^>]*>/gi)) {
-    const tag = m[0]
-    const name = /name\s*=\s*["']([^"']+)["']/i.exec(tag)?.[1]
-    if (!name) continue
-    const value = /value\s*=\s*["']([^"']*)["']/i.exec(tag)?.[1] ?? ""
-    const type = /type\s*=\s*["']([^"']+)["']/i.exec(tag)?.[1] ?? "text"
-    out.push({ name, value, type })
-  }
-  return out
-}
-
-// ============ 通用服务端登录 ============
-// 由 Gemini 通用识别登录表单（提交地址、邮箱/账号字段名、密码字段名），服务端 POST 登录，
-// 会话 cookie 存入 jar。成功后对该 host 的抓取/下载自动带登录态。
-// 参照你旧项目：登录页可能有隐藏字段/CSRF，需一并带上。
-export async function loginSite(
-  loginPageUrl: string,
-  email: string,
-  password: string,
-): Promise<{ ok: boolean; message: string }> {
-  const page = await rawFetch(loginPageUrl)
-  if (!page.body) return { ok: false, message: "无法打开登录页" }
-
-  // 让 Gemini 从登录页 HTML 识别表单结构（通用，不写死站点）
-  const formHtml = page.body.slice(0, 16000)
-  const detected = await geminiJson<{
-    action: string
-    method: string
-    emailField: string
-    passwordField: string
-  }>(
-    `下面是一个登录页的 HTML 片段。请识别其登录表单：\n` +
-      `- action：表单提交的 URL（相对或绝对都可，原样返回）\n` +
-      `- method：post 或 get\n` +
-      `- emailField：邮箱/账号/用户名输入框的 name 属性\n` +
-      `- passwordField：密码输入框的 name 属性\n` +
-      `只依据 HTML 中真实存在的字段，不要臆造。\n\nHTML：\n"""${formHtml}"""`,
-    {
-      type: "OBJECT",
-      properties: {
-        action: { type: "STRING" },
-        method: { type: "STRING" },
-        emailField: { type: "STRING" },
-        passwordField: { type: "STRING" },
-      },
-      required: ["action", "method", "emailField", "passwordField"],
-    },
-    { thinking: "adaptive" },
-  )
-
-  const actionUrl = absolutize(loginPageUrl, detected.action || loginPageUrl) || loginPageUrl
-  // 组装表单：邮箱+密码 + 所有隐藏字段（CSRF token 等）
-  const form: Record<string, string> = {}
-  for (const inp of extractInputs(page.body)) {
-    if (inp.type.toLowerCase() === "hidden") form[inp.name] = inp.value
-  }
-  form[detected.emailField || "email"] = email
-  form[detected.passwordField || "password"] = password
-
-  const resp = await rawPost(actionUrl, form, loginPageUrl)
-  // 验证：登录后通常会跳转或不再出现登录表单
-  const stillLogin = /name\s*=\s*["']?(password|passwd|pwd)["']?/i.test(resp.body) && /login/i.test(resp.finalUrl)
-  const ok = isLoggedIn(loginPageUrl) && !stillLogin
-  return {
-    ok,
-    message: ok
-      ? "登录成功，本次运行内对该站点的抓取/下载将自动带登录态"
-      : "登录可能失败（未捕获到会话或仍停留在登录页），请检查账号密码",
   }
 }
 

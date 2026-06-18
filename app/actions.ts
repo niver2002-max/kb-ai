@@ -11,8 +11,6 @@ import {
   selectLinks,
   downloadToProject,
   fetchLinkContent,
-  loginSite,
-  isLoggedIn,
 } from "@/lib/kb/crawl"
 import {
   readIndex,
@@ -569,13 +567,14 @@ export async function enumerateAndSelect(
 
   await patchCrawl(site.id, { busy: "AI 按目标筛选链接中" })
   const picked = await selectLinks(site, enumerated, userPrompt, opts?.maxPick ?? 60)
-  // 已登录则需登录文件也可服务端下载
-  const loggedIn = isLoggedIn(site.rootUrl)
+  // 默认勾选：可在线识别、开放可服务端下载、以及需手动下载（受登录保护）的项都预勾选，
+  // 受保护文件走"浏览器登录 + 一键批量下载到项目目录"。
   const links = picked.map((l) => ({
     ...l,
-    action:
-      l.action === "manual_download" && loggedIn ? ("server_download" as const) : l.action,
-    picked: l.action === "fetch" || l.action === "server_download" || (loggedIn && l.action === "manual_download"),
+    picked:
+      l.action === "fetch" ||
+      l.action === "server_download" ||
+      l.action === "manual_download",
   }))
 
   const updated = await patchCrawl(site.id, { links, busy: undefined })
@@ -590,58 +589,6 @@ export async function crawlSite(
 ) {
   const site = await classifyOnly(rootUrl)
   return enumerateAndSelect(site.id, userPrompt, opts)
-}
-
-// 服务端登录某抓取会话对应的站点（参照旧项目：账号密码 POST 登录，持有会话 cookie）。
-// email/password 留空则使用内置默认公开账号（若配置了 CRAWL_DEFAULT_EMAIL/PASSWORD）。
-export async function loginCrawlSite(
-  crawlId: string,
-  email?: string,
-  password?: string,
-) {
-  const site = await readCrawl(crawlId)
-  if (!site) throw new Error("抓取会话不存在")
-  const loginUrl = site.loginUrl || site.rootUrl
-  const finalEmail = (email || process.env.CRAWL_DEFAULT_EMAIL || "").trim()
-  const finalPassword = (password || process.env.CRAWL_DEFAULT_PASSWORD || "").trim()
-  if (!finalEmail || !finalPassword) {
-    throw new Error("请输入账号和密码（或在环境变量配置默认账号）")
-  }
-
-  await patchCrawl(crawlId, { busy: "服务端登录中" })
-  try {
-    const result = await loginSite(loginUrl, finalEmail, finalPassword)
-    await patchCrawl(crawlId, { loggedIn: result.ok, busy: undefined })
-    return { ok: result.ok, message: result.message, site: await readCrawl(crawlId) }
-  } catch (err) {
-    await patchCrawl(crawlId, { busy: undefined })
-    throw err
-  }
-}
-
-// 已登录后重新抓取：很多需登录站点登录后才会显示完整文件列表，需要重新枚举。
-export async function recrawlAfterLogin(crawlId: string, userPrompt: string) {
-  const site = await readCrawl(crawlId)
-  if (!site) throw new Error("抓取会话不存在")
-  await patchCrawl(crawlId, { busy: "登录后重新遍历中" })
-
-  const enumerated = await enumerateSite(site, {
-    maxLinks: 3000,
-    maxDepth: site.siteKind === "wiki" ? 0 : 2,
-  })
-  await patchCrawl(crawlId, { busy: "AI 按目标筛选链接中" })
-  const picked = await selectLinks(site, enumerated, userPrompt, 80)
-  // 登录后：开放文件与需登录文件都可由服务端下载（已持有会话）
-  const links = picked.map((l) => ({
-    ...l,
-    action:
-      l.action === "manual_download" && isLoggedIn(site.rootUrl)
-        ? ("server_download" as const)
-        : l.action,
-    picked: l.action === "fetch" || l.action === "server_download" || l.action === "manual_download",
-  }))
-  const updated = await patchCrawl(crawlId, { links, busy: undefined })
-  return updated
 }
 
 // 把勾选的可在线识别链接（action=fetch）抓取并入库为知识库来源。
