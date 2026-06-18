@@ -431,13 +431,66 @@ async function fetchWithRetry(
   throw new Error(`${label} 多次重试后仍失败：${lastErr}`)
 }
 
+// ---- 嵌入端点熔断器 ----
+// 第三方中转的向量端点经常整段不可用（持续 503，或压根不提供 embedding 返回 404）。
+// 没有熔断时，每个分块、每个文件都会把"重试→降级逐条→再重试"整套跑一遍，白白浪费大量时间。
+// 熔断器：连续失败到阈值就"跳闸"，冷却期内所有嵌入请求直接快速失败（零网络、零重试），
+// 让上层秒级降级为关键词检索；冷却到期后自动半开重试一次，端点恢复即自愈。
+class EmbedUnavailableError extends Error {
+  constructor(msg: string) {
+    super(msg)
+    this.name = "EmbedUnavailableError"
+  }
+}
+let embedCircuitOpenUntil = 0
+let embedConsecutiveFails = 0
+const EMBED_TEMP_COOLDOWN_MS = 60_000 // 临时错误（503/429/超时）：冷却 60s
+const EMBED_PERM_COOLDOWN_MS = 10 * 60_000 // 永久错误（端点不支持嵌入，4xx）：冷却 10 分钟
+
+function ensureEmbedCircuitClosed(): void {
+  if (Date.now() < embedCircuitOpenUntil) {
+    const sec = Math.ceil((embedCircuitOpenUntil - Date.now()) / 1000)
+    throw new EmbedUnavailableError(`嵌入端点暂不可用，熔断冷却中（约 ${sec}s 后重试），本次直接走关键词模式`)
+  }
+}
+function noteEmbedSuccess(): void {
+  embedConsecutiveFails = 0
+  embedCircuitOpenUntil = 0
+}
+function noteEmbedFailure(message: string): void {
+  embedConsecutiveFails++
+  // 永久性错误（端点根本不支持嵌入）：长冷却，立即跳闸
+  const permanent = /\((400|401|403|404|405|501)\)/.test(message)
+  if (permanent) {
+    embedCircuitOpenUntil = Date.now() + EMBED_PERM_COOLDOWN_MS
+    console.log(`[v0] 嵌入端点不支持/被拒绝，熔断 10 分钟，期间走关键词模式：${message}`)
+  } else if (embedConsecutiveFails >= 2) {
+    embedCircuitOpenUntil = Date.now() + EMBED_TEMP_COOLDOWN_MS
+    console.log(`[v0] 嵌入端点连续失败，熔断 60s，期间走关键词模式：${message}`)
+  }
+}
+
+// 嵌入专用请求：先查熔断器（已跳闸则零网络快速失败），再带少量重试发起请求，
+// 并据结果开闸/跳闸。嵌入只重试 2 次（批量失败还会降级逐条，无需重试太多）。
+async function embedFetch(url: string, init: RequestInit, label: string): Promise<Response> {
+  ensureEmbedCircuitClosed()
+  try {
+    const res = await fetchWithRetry(url, init, label, 2)
+    noteEmbedSuccess()
+    return res
+  } catch (e) {
+    noteEmbedFailure((e as Error).message)
+    throw e
+  }
+}
+
 // 单条文本向量
 export async function geminiEmbedOne(
   text: string,
   taskType: "RETRIEVAL_DOCUMENT" | "RETRIEVAL_QUERY" = "RETRIEVAL_QUERY",
 ): Promise<number[]> {
   const embedModel = EMBED_MODEL()
-  const res = await fetchWithRetry(
+  const res = await embedFetch(
     `${EMBED_BASE_URL()}/models/${embedModel}:embedContent`,
     {
       method: "POST",
@@ -465,9 +518,11 @@ export async function geminiEmbedBatch(texts: string[]): Promise<number[][]> {
   const BATCH = 100
   for (let i = 0; i < texts.length; i += BATCH) {
     const slice = texts.slice(i, i + BATCH)
+    // 熔断已跳闸：直接抛出，让上层（embedSegments）整体走关键词模式，不再做任何无谓重试。
+    ensureEmbedCircuitClosed()
     try {
       const embedModel = EMBED_MODEL()
-      const res = await fetchWithRetry(
+      const res = await embedFetch(
         `${EMBED_BASE_URL()}/models/${embedModel}:batchEmbedContents`,
         {
           method: "POST",
@@ -484,7 +539,6 @@ export async function geminiEmbedBatch(texts: string[]): Promise<number[][]> {
           }),
         },
         "Gemini batchEmbedContents",
-        3,
       )
       const json = (await res.json()) as { embeddings?: Array<{ values?: number[] }> }
       const vecs = json.embeddings ?? []
@@ -492,8 +546,11 @@ export async function geminiEmbedBatch(texts: string[]): Promise<number[][]> {
       if (vecs.length !== slice.length) throw new Error("批量返回数量不匹配")
       for (const e of vecs) out.push(e.values ?? [])
     } catch (e) {
+      // 熔断/端点不可用：快速失败上抛，由 embedSegments 一次性降级整篇为关键词模式。
+      if (e instanceof EmbedUnavailableError) throw e
       console.log(`[v0] 批量嵌入失败，降级为逐条：${(e as Error).message}`)
       for (const text of slice) {
+        // geminiEmbedOne 内部也走熔断器；一旦跳闸会立即抛 EmbedUnavailableError 终止整篇，避免逐条空转
         const v = await geminiEmbedOne(text, "RETRIEVAL_DOCUMENT")
         out.push(v)
       }

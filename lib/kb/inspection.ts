@@ -290,12 +290,17 @@ async function execReindex(lib: KbLibrary): Promise<string> {
   const missing = index.chunks.filter((c) => !c.embedding || c.embedding.length === 0)
   let embedded = 0
   if (missing.length > 0) {
-    const vectors = await geminiEmbedBatch(missing.map((c) => c.text))
-    for (let i = 0; i < missing.length; i++) {
-      if (vectors[i]?.length) {
-        missing[i].embedding = vectors[i]
-        embedded++
+    // 嵌入端点不可用时（熔断/持续 503）不让整个巡检任务失败：跳过补嵌入，保留关键词检索。
+    try {
+      const vectors = await geminiEmbedBatch(missing.map((c) => c.text))
+      for (let i = 0; i < missing.length; i++) {
+        if (vectors[i]?.length) {
+          missing[i].embedding = vectors[i]
+          embedded++
+        }
       }
+    } catch (e) {
+      console.log(`[v0] 重建索引时嵌入不可用，保留关键词模式：${(e as Error).message}`)
     }
   }
   const seen = new Set<string>()
