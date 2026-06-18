@@ -31,6 +31,7 @@ import {
   RefreshCw,
   LogIn,
   ExternalLink,
+  ArrowRightToLine,
 } from "lucide-react"
 
 // 站点类型中文标签
@@ -70,15 +71,17 @@ export function SiteCrawler({
   const manualDl = links.filter((l) => l.action === "manual_download")
   const traverse = links.filter((l) => l.action === "traverse")
 
-  function runCrawl() {
-    if (!/^https?:\/\//i.test(url.trim())) {
+  function runCrawl(targetUrl?: string) {
+    const u = (targetUrl ?? url).trim()
+    if (!/^https?:\/\//i.test(u)) {
       toast.error("请输入有效的 http(s) 网址")
       return
     }
-    setBusyLabel("分诊并遍历站点中…")
+    if (targetUrl) setUrl(targetUrl) // 深入子目录时同步输入框
+    setBusyLabel(targetUrl ? "深入抓取子目录中…" : "分诊并遍历站点中…")
     startTransition(async () => {
       try {
-        const result = await crawlSite(url.trim(), prompt.trim())
+        const result = await crawlSite(u, prompt.trim())
         setSite(result)
         toast.success(`分诊完成：${SITE_KIND_LABEL[result?.siteKind ?? "unknown"]}，发现 ${result?.links.length ?? 0} 条相关链接`)
       } catch (e) {
@@ -250,7 +253,7 @@ export function SiteCrawler({
               rows={2}
             />
           </div>
-          <Button onClick={runCrawl} disabled={pending} className="gap-2 self-start">
+          <Button onClick={() => runCrawl()} disabled={pending} className="gap-2 self-start">
             {pending && busyLabel.includes("分诊") ? (
               <Loader2 className="size-4 animate-spin" />
             ) : (
@@ -328,7 +331,13 @@ export function SiteCrawler({
             <LinkGroup title="可在线识别" links={fetchable} onToggle={togglePick} />
             <LinkGroup title="开放可下载" links={serverDl} onToggle={togglePick} />
             <LinkGroup title="需手动下载（登录/不可在线识别）" links={manualDl} onToggle={togglePick} />
-            <LinkGroup title="子目录（可作为新网址继续抓取）" links={traverse} onToggle={togglePick} readonly />
+            <LinkGroup
+              title="子目录（点「深入」继续抓取）"
+              links={traverse}
+              onToggle={togglePick}
+              readonly
+              onDeepCrawl={pending ? undefined : (u) => runCrawl(u)}
+            />
           </div>
         </Card>
       )}
@@ -341,11 +350,13 @@ function LinkGroup({
   links,
   onToggle,
   readonly,
+  onDeepCrawl,
 }: {
   title: string
   links: KbCrawlLink[]
   onToggle: (l: KbCrawlLink) => void
   readonly?: boolean
+  onDeepCrawl?: (url: string) => void
 }) {
   if (links.length === 0) return null
   return (
@@ -389,10 +400,23 @@ function LinkGroup({
                 </a>
                 {l.note && <span className="text-xs text-muted-foreground">{l.note}</span>}
               </div>
-              <span className={`shrink-0 rounded px-1.5 py-0.5 text-[10px] font-medium ${meta.cls}`}>
-                {meta.label}
-                {typeof l.relevance === "number" && ` ${l.relevance.toFixed(2)}`}
-              </span>
+              <div className="flex shrink-0 items-center gap-1.5">
+                {onDeepCrawl && (
+                  <Button
+                    size="sm"
+                    variant="ghost"
+                    className="h-6 gap-1 px-2 text-xs"
+                    onClick={() => onDeepCrawl(l.url)}
+                  >
+                    <ArrowRightToLine className="size-3" />
+                    深入
+                  </Button>
+                )}
+                <span className={`rounded px-1.5 py-0.5 text-[10px] font-medium ${meta.cls}`}>
+                  {meta.label}
+                  {typeof l.relevance === "number" && ` ${l.relevance.toFixed(2)}`}
+                </span>
+              </div>
             </div>
           )
         })}
