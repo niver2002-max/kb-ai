@@ -51,6 +51,60 @@ export interface KbChunk {
   embedding: number[]
 }
 
+// ===== 多阶段自适应构建流程（human-in-the-loop）=====
+
+// 工作流所处阶段
+export type WorkflowStage =
+  | "idle" // 尚未开始
+  | "scanned" // 已扫描 + 初筛，已生成第一批问题，等待用户回答
+  | "built" // 已二筛 + 建目录 + 精细化，已生成第一份报告与第二批问题，等待回答
+  | "reviewing" // 已生成第二份报告，等待用户验收
+  | "ready" // 验收通过，进入对话提升模式
+
+// 一道选择题（支持单选 / 多选）
+export interface KbQuestion {
+  id: string
+  question: string
+  options: string[]
+  multiSelect: boolean
+  answer?: string[] // 用户的选择（保存所选 option 文本）
+  freeText?: string // 用户的补充说明（可选）
+}
+
+// 一轮问答
+export interface KbQuestionRound {
+  round: number
+  intro: string // LLM 对本轮提问的说明 / 初筛或报告概述
+  questions: KbQuestion[]
+  answeredAt?: number
+}
+
+// 一份阶段报告
+export interface KbReport {
+  round: number
+  markdown: string
+  createdAt: number
+}
+
+// 知识库目录树中的一个分类
+export interface KbCategory {
+  id: string
+  name: string
+  description: string
+  sourceIds: string[]
+}
+
+// 整个构建工作流的状态
+export interface KbWorkflow {
+  stage: WorkflowStage
+  userPrompt: string // 用户的总体目标 / 提示词
+  rounds: KbQuestionRound[]
+  reports: KbReport[]
+  categories: KbCategory[] // 二筛后构建的知识库目录树
+  busy?: string // 正在进行的后台动作描述（用于 UI 显示）
+  updatedAt: number
+}
+
 export interface KbIndex {
   // 知识库元信息
   rootDir: string | null
@@ -59,6 +113,7 @@ export interface KbIndex {
   embeddingModel: string
   sources: KbSource[]
   chunks: KbChunk[]
+  workflow: KbWorkflow
 }
 
 export interface ScanResult {

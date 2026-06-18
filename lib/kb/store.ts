@@ -1,6 +1,6 @@
 import { promises as fs } from "node:fs"
 import path from "node:path"
-import type { KbIndex, KbSource, KbChunk } from "./types"
+import type { KbIndex, KbSource, KbChunk, KbWorkflow } from "./types"
 
 // 知识库数据全部存放在项目根目录下的 .kb-data 文件夹（纯本地，无需任何云数据库）
 const DATA_DIR = path.join(process.cwd(), ".kb-data")
@@ -8,6 +8,17 @@ const INDEX_FILE = path.join(DATA_DIR, "index.json")
 
 // 向量模型走 Gemini 原生端点（见 lib/kb/gemini.ts）
 const EMBEDDING_MODEL = "gemini-embedding-001"
+
+export function emptyWorkflow(): KbWorkflow {
+  return {
+    stage: "idle",
+    userPrompt: "",
+    rounds: [],
+    reports: [],
+    categories: [],
+    updatedAt: Date.now(),
+  }
+}
 
 function emptyIndex(): KbIndex {
   return {
@@ -17,6 +28,7 @@ function emptyIndex(): KbIndex {
     embeddingModel: EMBEDDING_MODEL,
     sources: [],
     chunks: [],
+    workflow: emptyWorkflow(),
   }
 }
 
@@ -34,6 +46,7 @@ export async function readIndex(): Promise<KbIndex> {
     // 兜底字段
     if (!parsed.sources) parsed.sources = []
     if (!parsed.chunks) parsed.chunks = []
+    if (!parsed.workflow) parsed.workflow = emptyWorkflow()
     return parsed
   } catch {
     return emptyIndex()
@@ -96,6 +109,22 @@ export async function setRootDir(dir: string): Promise<void> {
   const index = await readIndex()
   index.rootDir = dir
   await writeIndex(index)
+}
+
+// 局部更新工作流状态
+export async function patchWorkflow(
+  patch: Partial<KbWorkflow>,
+): Promise<KbWorkflow> {
+  const index = await readIndex()
+  index.workflow = { ...index.workflow, ...patch, updatedAt: Date.now() }
+  await writeIndex(index)
+  return index.workflow
+}
+
+// 直接读取工作流
+export async function readWorkflow(): Promise<KbWorkflow> {
+  const index = await readIndex()
+  return index.workflow
 }
 
 export async function resetIndex(): Promise<void> {
