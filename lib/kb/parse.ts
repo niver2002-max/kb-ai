@@ -1,6 +1,6 @@
 import { promises as fs } from "node:fs"
 import type { KbSource } from "./types"
-import { geminiPdf } from "./gemini"
+import { geminiPdf, geminiUrlContext } from "./gemini"
 
 // 单个来源解析后的结果：若干带定位信息的文本片段
 export interface ParsedSegment {
@@ -181,8 +181,8 @@ export async function parseFile(source: KbSource): Promise<ParseResult> {
   return { segments: text ? [{ text }] : [], charCount: text.length }
 }
 
-// 抓取网页并抽取正文
-export async function fetchWeb(url: string): Promise<ParseResult> {
+// 本地兜底抓取：直接 fetch + 去标签（用于原生 url_context 不可用时）。
+async function fetchWebLocal(url: string): Promise<ParseResult> {
   const res = await fetch(url, {
     headers: {
       "User-Agent":
@@ -197,6 +197,27 @@ export async function fetchWeb(url: string): Promise<ParseResult> {
   const raw = await res.text()
   const text = ct.includes("html") ? stripHtml(raw) : raw.trim()
   return { segments: text ? [{ text, loc: url }] : [], charCount: text.length }
+}
+
+// 抓取网页：默认走 Gemini 原生 url_context（模型自行抓取并理解，剔除导航/广告，
+// 输出结构化 Markdown 正文），失败再回退本地 fetch+去标签。
+export async function fetchWeb(url: string): Promise<ParseResult> {
+  try {
+    const md = (
+      await geminiUrlContext(
+        url,
+        "请抓取该网页并把正文内容完整转写为结构化 Markdown：保留标题层级、列表、表格、" +
+          "代码块；剔除导航栏、页脚、广告、推荐位等无关内容。只输出正文本身，不要寒暄或解释。",
+      )
+    ).trim()
+    if (md.length >= 40) {
+      return { segments: [{ text: md, loc: url }], charCount: md.length }
+    }
+    // 原生产出过少 → 回退本地抓取
+    return await fetchWebLocal(url)
+  } catch {
+    return fetchWebLocal(url)
+  }
 }
 
 // 将解析片段切成适合嵌入的小块（按字符数，带重叠以保留上下文）

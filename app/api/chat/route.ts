@@ -29,13 +29,22 @@ export async function POST(req: Request) {
     })
     .join("\n\n---\n\n")
 
+  // 是否允许联网补全（默认开启）。可用 GEMINI_WEB_GROUNDING=false 关闭。
+  const webGrounding =
+    (process.env.GEMINI_WEB_GROUNDING ?? "true").toLowerCase() !== "false"
+
   const system =
-    "你是一个本地知识库问答助手。请严格依据下面提供的【知识库片段】回答用户问题，" +
-    "并在引用具体内容时标注来源编号（如 [来源 1]）。" +
-    "如果知识库中没有相关信息，请如实说明，不要编造。用中文回答。\n\n" +
+    "你是一个本地知识库问答助手。回答优先严格依据下面的【知识库片段】，" +
+    "引用具体内容时标注来源编号（如 [来源 1]）。" +
+    (webGrounding
+      ? "当知识库不足以回答时，可使用联网检索(Google 搜索)自适应补全外部信息，" +
+        "并明确标注「（联网补全）」以区分本地资料。"
+      : "如果知识库中没有相关信息，请如实说明，不要编造。") +
+    "用中文回答。\n\n" +
     (context
       ? `知识库片段：\n${context}`
-      : "（当前没有检索到相关知识库片段，请提示用户先构建知识库或换个问法。）")
+      : "（当前没有检索到相关知识库片段。" +
+        (webGrounding ? "可通过联网检索回答，并标注「（联网补全）」。）" : "请提示用户先构建知识库或换个问法。）"))
 
   // 转成 Gemini contents 格式（assistant → model）
   const contents = messages.map((m) => ({
@@ -43,8 +52,12 @@ export async function POST(req: Request) {
     parts: [{ text: m.content }],
   }))
 
-  // adaptive 思考：交给 Gemini 动态思考按问题复杂度自动调节深度
-  const stream = await geminiStream(contents, { system, thinking: "adaptive" })
+  // adaptive 思考 + 原生联网检索（grounding），由模型按需自适应补全
+  const stream = await geminiStream(contents, {
+    system,
+    thinking: "adaptive",
+    ...(webGrounding ? { tools: [{ google_search: {} }] } : {}),
+  })
 
   return new Response(stream, {
     headers: {

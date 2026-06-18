@@ -179,6 +179,33 @@ export async function geminiContents(
   return callGenerate(body)
 }
 
+// 原生网页理解：用 Gemini 的 url_context 工具，让模型自己抓取并读懂网页内容
+// （能处理 JS 渲染、自动剔除导航/广告），再按 instruction 输出。比手写 fetch+stripHtml 准确得多。
+export async function geminiUrlContext(
+  url: string,
+  instruction: string,
+  opts: GenOpts = {},
+): Promise<string> {
+  const body = buildBody(
+    [{ role: "user", parts: [{ text: `${instruction}\n\n网址：${url}` }] }],
+    { thinking: "adaptive", ...opts, tools: [{ url_context: {} }] },
+  )
+  return callGenerate(body)
+}
+
+// 原生联网检索：用 Gemini 的 google_search 工具做实时检索（grounding），
+// 用于在本地资料不足时由 AI 自适应补全外部信息。
+export async function geminiSearch(
+  query: string,
+  opts: GenOpts = {},
+): Promise<string> {
+  const body = buildBody(
+    [{ role: "user", parts: [{ text: query }] }],
+    { thinking: "adaptive", ...opts, tools: [{ google_search: {} }] },
+  )
+  return callGenerate(body)
+}
+
 // 结构化 JSON 生成（带 schema），自动解析为对象
 export async function geminiJson<T>(
   prompt: string,
