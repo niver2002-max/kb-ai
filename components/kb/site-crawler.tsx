@@ -9,6 +9,8 @@ import {
   getDownloadManifest,
   setCrawlLinkPicked,
   rescanDownloads,
+  loginCrawlSite,
+  recrawlAfterLogin,
 } from "@/app/actions"
 import type { KbState } from "@/components/kb/knowledge-base"
 import type { KbCrawlSite, KbCrawlLink, LinkAction } from "@/lib/kb/types"
@@ -64,6 +66,8 @@ export function SiteCrawler({
   const [site, setSite] = useState<KbCrawlSite | null>(null)
   const [pending, startTransition] = useTransition()
   const [busyLabel, setBusyLabel] = useState("")
+  const [loginEmail, setLoginEmail] = useState("")
+  const [loginPassword, setLoginPassword] = useState("")
 
   const links = site?.links ?? []
   const fetchable = links.filter((l) => l.action === "fetch")
@@ -86,6 +90,32 @@ export function SiteCrawler({
         toast.success(`分诊完成：${SITE_KIND_LABEL[result?.siteKind ?? "unknown"]}，发现 ${result?.links.length ?? 0} 条相关链接`)
       } catch (e) {
         toast.error(e instanceof Error ? e.message : "抓取失败")
+      } finally {
+        setBusyLabel("")
+      }
+    })
+  }
+
+  // 服务端登录（账号密码）→ 登录成功后自动重新遍历，需登录文件转为服务端可下载
+  function runLogin() {
+    if (!site) return
+    setBusyLabel("服务端登录中…")
+    startTransition(async () => {
+      try {
+        const r = await loginCrawlSite(site.id, loginEmail.trim(), loginPassword)
+        if (!r.ok) {
+          toast.error(r.message)
+          if (r.site) setSite(r.site)
+          setBusyLabel("")
+          return
+        }
+        toast.success(r.message)
+        setBusyLabel("登录成功，重新遍历中…")
+        const updated = await recrawlAfterLogin(site.id, prompt.trim())
+        if (updated) setSite(updated)
+        toast.success("已用登录态重新枚举，受保护文件现可服务端下载")
+      } catch (e) {
+        toast.error(e instanceof Error ? e.message : "登录失败")
       } finally {
         setBusyLabel("")
       }
@@ -318,11 +348,47 @@ export function SiteCrawler({
             </Button>
           </div>
 
-          {site.requiresLogin && manualDl.length > 0 && (
-            <div className="rounded-md border border-amber-500/30 bg-amber-500/5 px-4 py-3 text-xs leading-relaxed text-amber-700 dark:text-amber-300">
-              该站需要登录。请先在浏览器<strong>新标签页登录该网站</strong>（同域登录态会自动共享），
-              再点「一键批量下载到项目」，浏览器会用你的登录态把文件写入 <code className="font-mono">downloads/</code>。
-              若被 CORS 拦截，将自动降级为逐个触发下载，请手动移入后点「重扫」。
+          {site.requiresLogin && (
+            <div className="flex flex-col gap-3 rounded-md border border-amber-500/30 bg-amber-500/5 p-4">
+              <div className="flex items-center gap-2 text-sm font-medium text-amber-700 dark:text-amber-300">
+                <LogIn className="size-4" />
+                {site.loggedIn ? "已登录该站点" : "该站需要登录后才能下载受保护文件"}
+              </div>
+              {!site.loggedIn && (
+                <>
+                  <p className="text-xs leading-relaxed text-muted-foreground">
+                    在服务端登录该网站（账号密码由 AI 自动识别表单字段后提交），登录态保留在本次运行内，
+                    之后受保护文件可由服务端直接下载到 <code className="font-mono">downloads/</code>。留空则使用环境变量中的默认账号。
+                  </p>
+                  <div className="flex flex-col gap-2 sm:flex-row">
+                    <Input
+                      placeholder="账号 / 邮箱"
+                      value={loginEmail}
+                      onChange={(e) => setLoginEmail(e.target.value)}
+                      disabled={pending}
+                      className="sm:max-w-[220px]"
+                    />
+                    <Input
+                      type="password"
+                      placeholder="密码"
+                      value={loginPassword}
+                      onChange={(e) => setLoginPassword(e.target.value)}
+                      disabled={pending}
+                      className="sm:max-w-[220px]"
+                    />
+                    <Button onClick={runLogin} disabled={pending} size="sm" className="gap-1.5">
+                      <LogIn className="size-4" />
+                      登录并重新遍历
+                    </Button>
+                  </div>
+                </>
+              )}
+              {manualDl.length > 0 && (
+                <p className="text-xs leading-relaxed text-muted-foreground">
+                  也可在浏览器<strong>新标签页登录该网站</strong>后，点下方「一键批量下载到项目」，
+                  浏览器用同域登录态把文件写入 <code className="font-mono">downloads/</code>（被 CORS 拦截时降级为逐个下载）。
+                </p>
+              )}
             </div>
           )}
 

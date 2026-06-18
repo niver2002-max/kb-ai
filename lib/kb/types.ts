@@ -145,6 +145,10 @@ export interface KbCrawlSite {
   rootUrl: string
   siteKind: SiteKind
   requiresLogin: boolean
+  // 登录页 URL（requiresLogin 时由分诊给出，供服务端登录）
+  loginUrl?: string
+  // 是否已在服务端登录该站点（本次运行内）
+  loggedIn?: boolean
   // 分诊说明 + 采用的遍历策略描述
   summary: string
   strategy: string

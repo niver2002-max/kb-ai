@@ -12,10 +12,54 @@ import { geminiJson, geminiUrlContext } from "./gemini"
 import { mapLimit } from "./concurrency"
 
 const UA =
-  "Mozilla/5.0 (compatible; LocalKnowledgeBase/1.0; +local)"
+  "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
 
 // 项目内统一下载目录
 export const DOWNLOADS_DIR = path.join(process.cwd(), "downloads")
+
+// 服务端 cookie jar：按 hostname 保存登录后的会话 cookie（如 PHPSESSID）。
+// 进程内存级，本次运行有效；登录后所有对该 host 的抓取/下载自动带上。
+const cookieJar = new Map<string, string>()
+
+function hostOf(url: string): string {
+  try {
+    return new URL(url).hostname
+  } catch {
+    return ""
+  }
+}
+
+// 合并 Set-Cookie 到 jar（只保留 name=value，丢弃 attributes）
+function storeCookies(url: string, setCookies: string[]) {
+  if (setCookies.length === 0) return
+  const host = hostOf(url)
+  if (!host) return
+  const existing = new Map<string, string>()
+  for (const pair of (cookieJar.get(host) || "").split("; ").filter(Boolean)) {
+    const i = pair.indexOf("=")
+    if (i > 0) existing.set(pair.slice(0, i), pair.slice(i + 1))
+  }
+  for (const sc of setCookies) {
+    const first = sc.split(";")[0]
+    const i = first.indexOf("=")
+    if (i > 0) existing.set(first.slice(0, i).trim(), first.slice(i + 1).trim())
+  }
+  cookieJar.set(
+    host,
+    Array.from(existing.entries())
+      .map(([k, v]) => `${k}=${v}`)
+      .join("; "),
+  )
+}
+
+function cookieHeader(url: string): string {
+  return cookieJar.get(hostOf(url)) || ""
+}
+
+// 是否已对该 host 登录（jar 里有 cookie）
+export function isLoggedIn(url: string): boolean {
+  return !!cookieJar.get(hostOf(url))
+}
 
 function rid(prefix: string): string {
   return `${prefix}-${Math.random().toString(36).slice(2, 9)}`
@@ -38,11 +82,15 @@ async function rawFetch(
   const ctrl = new AbortController()
   const t = setTimeout(() => ctrl.abort(), timeoutMs)
   try {
+    const cookie = cookieHeader(url)
     const res = await fetch(url, {
-      headers: { "User-Agent": UA, Accept: "*/*" },
+      headers: { "User-Agent": UA, Accept: "*/*", ...(cookie ? { Cookie: cookie } : {}) },
       redirect: "follow",
       signal: ctrl.signal,
     })
+    // 捕获会话 cookie（登录后续用）
+    const setCookies = res.headers.getSetCookie?.() ?? []
+    if (setCookies.length) storeCookies(url, setCookies)
     const contentType = res.headers.get("content-type") || ""
     // 只读文本类内容；二进制不读 body（避免大文件）
     let body = ""
@@ -54,6 +102,114 @@ async function rawFetch(
     return { ok: false, status: 0, contentType: "", body: "", finalUrl: url }
   } finally {
     clearTimeout(t)
+  }
+}
+
+// 发送 application/x-www-form-urlencoded POST（带 cookie jar，捕获 Set-Cookie）。
+async function rawPost(
+  url: string,
+  form: Record<string, string>,
+  referer?: string,
+  timeoutMs = 20000,
+): Promise<{ ok: boolean; status: number; body: string; finalUrl: string }> {
+  const ctrl = new AbortController()
+  const t = setTimeout(() => ctrl.abort(), timeoutMs)
+  try {
+    const cookie = cookieHeader(url)
+    const res = await fetch(url, {
+      method: "POST",
+      headers: {
+        "User-Agent": UA,
+        "Content-Type": "application/x-www-form-urlencoded",
+        ...(cookie ? { Cookie: cookie } : {}),
+        ...(referer ? { Referer: referer } : {}),
+      },
+      body: new URLSearchParams(form).toString(),
+      redirect: "follow",
+      signal: ctrl.signal,
+    })
+    const setCookies = res.headers.getSetCookie?.() ?? []
+    if (setCookies.length) storeCookies(url, setCookies)
+    const body = await res.text().catch(() => "")
+    return { ok: res.ok, status: res.status, body, finalUrl: res.url }
+  } catch {
+    return { ok: false, status: 0, body: "", finalUrl: url }
+  } finally {
+    clearTimeout(t)
+  }
+}
+
+// 提取 HTML 中所有 <input>（含 name/value/type），用于补全登录表单的隐藏字段。
+function extractInputs(html: string): Array<{ name: string; value: string; type: string }> {
+  const out: Array<{ name: string; value: string; type: string }> = []
+  for (const m of html.matchAll(/<input\b[^>]*>/gi)) {
+    const tag = m[0]
+    const name = /name\s*=\s*["']([^"']+)["']/i.exec(tag)?.[1]
+    if (!name) continue
+    const value = /value\s*=\s*["']([^"']*)["']/i.exec(tag)?.[1] ?? ""
+    const type = /type\s*=\s*["']([^"']+)["']/i.exec(tag)?.[1] ?? "text"
+    out.push({ name, value, type })
+  }
+  return out
+}
+
+// ============ 通用服务端登录 ============
+// 由 Gemini 通用识别登录表单（提交地址、邮箱/账号字段名、密码字段名），服务端 POST 登录，
+// 会话 cookie 存入 jar。成功后对该 host 的抓取/下载自动带登录态。
+// 参照你旧项目：登录页可能有隐藏字段/CSRF，需一并带上。
+export async function loginSite(
+  loginPageUrl: string,
+  email: string,
+  password: string,
+): Promise<{ ok: boolean; message: string }> {
+  const page = await rawFetch(loginPageUrl)
+  if (!page.body) return { ok: false, message: "无法打开登录页" }
+
+  // 让 Gemini 从登录页 HTML 识别表单结构（通用，不写死站点）
+  const formHtml = page.body.slice(0, 16000)
+  const detected = await geminiJson<{
+    action: string
+    method: string
+    emailField: string
+    passwordField: string
+  }>(
+    `下面是一个登录页的 HTML 片段。请识别其登录表单：\n` +
+      `- action：表单提交的 URL（相对或绝对都可，原样返回）\n` +
+      `- method：post 或 get\n` +
+      `- emailField：邮箱/账号/用户名输入框的 name 属性\n` +
+      `- passwordField：密码输入框的 name 属性\n` +
+      `只依据 HTML 中真实存在的字段，不要臆造。\n\nHTML：\n"""${formHtml}"""`,
+    {
+      type: "OBJECT",
+      properties: {
+        action: { type: "STRING" },
+        method: { type: "STRING" },
+        emailField: { type: "STRING" },
+        passwordField: { type: "STRING" },
+      },
+      required: ["action", "method", "emailField", "passwordField"],
+    },
+    { thinking: "adaptive" },
+  )
+
+  const actionUrl = absolutize(loginPageUrl, detected.action || loginPageUrl) || loginPageUrl
+  // 组装表单：邮箱+密码 + 所有隐藏字段（CSRF token 等）
+  const form: Record<string, string> = {}
+  for (const inp of extractInputs(page.body)) {
+    if (inp.type.toLowerCase() === "hidden") form[inp.name] = inp.value
+  }
+  form[detected.emailField || "email"] = email
+  form[detected.passwordField || "password"] = password
+
+  const resp = await rawPost(actionUrl, form, loginPageUrl)
+  // 验证：登录后通常会跳转或不再出现登录表单
+  const stillLogin = /name\s*=\s*["']?(password|passwd|pwd)["']?/i.test(resp.body) && /login/i.test(resp.finalUrl)
+  const ok = isLoggedIn(loginPageUrl) && !stillLogin
+  return {
+    ok,
+    message: ok
+      ? "登录成功，本次运行内对该站点的抓取/下载将自动带登录态"
+      : "登录可能失败（未捕获到会话或仍停留在登录页），请检查账号密码",
   }
 }
 
@@ -89,6 +245,29 @@ function extractRawLinks(base: string, body: string, contentType: string): Array
   return out
 }
 
+// 检测分页并生成全部页 URL（确定性，不依赖模型）。
+// 支持 ?page=N / &page=N 形式：从页面里找出所有 page=N 链接，取最大页码，生成 1..max 全部页。
+function enumeratePageUrls(rootUrl: string, html: string): string[] {
+  if (!html) return [rootUrl]
+  let maxPage = 1
+  for (const m of html.matchAll(/[?&]page=(\d+)/gi)) {
+    const n = parseInt(m[1], 10)
+    if (Number.isFinite(n) && n > maxPage) maxPage = n
+  }
+  // 安全上限，避免异常大的页码导致海量请求
+  maxPage = Math.min(maxPage, 500)
+  if (maxPage <= 1) return [rootUrl]
+
+  const u = new URL(rootUrl)
+  const urls: string[] = []
+  for (let p = 1; p <= maxPage; p++) {
+    const cur = new URL(u.toString())
+    cur.searchParams.set("page", String(p))
+    urls.push(cur.toString())
+  }
+  return urls
+}
+
 // 文件扩展名推断
 function guessExt(url: string): string {
   const clean = url.split("?")[0].split("#")[0]
@@ -120,20 +299,29 @@ export async function classifySite(rootUrl: string): Promise<KbCrawlSite> {
 
   const sample = home.body.replace(/<script[\s\S]*?<\/script>/gi, "").replace(/<style[\s\S]*?<\/style>/gi, "").replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").slice(0, 3000)
 
+  // 收集页面里指向"登录"的链接，供模型挑选登录页 URL
+  const loginLinks = extractRawLinks(home.finalUrl || rootUrl, home.body, home.contentType)
+    .filter((l) => /login|signin|sign-in|登录|登陆|登錄|会员|用户/i.test(l.url + " " + l.title))
+    .slice(0, 12)
+    .map((l) => l.url)
+  const loginLinkHint = loginLinks.length ? `候选登录相关链接：\n${loginLinks.join("\n")}` : ""
+
   const out = await geminiJson<{
     siteKind: SiteKind
     requiresLogin: boolean
+    loginUrl: string
     summary: string
     strategy: string
   }>(
     `你是网站分诊专家。请判断下面这个站点的类型，不要臆测。\n` +
       `URL：${rootUrl}\n` +
       `HTTP 状态：${home.status}，Content-Type：${home.contentType}\n` +
-      `${sitemapHint}\n${loginSignals}\n` +
+      `${sitemapHint}\n${loginSignals}\n${loginLinkHint}\n` +
       `页面文本样本（已去标签，截断）：\n"""${sample}"""\n\n` +
       `请返回：\n` +
       `- siteKind：wiki(文档/百科) | open_download(开放下载站) | login_download(需登录下载站) | generic(普通网页) | unknown\n` +
       `- requiresLogin：下载其内容是否需要登录\n` +
+      `- loginUrl：若需登录，给出登录页的绝对 URL（从候选链接中挑选或推断）；不需要则返回空字符串\n` +
       `- summary：一句话概述该站点是什么、有什么内容\n` +
       `- strategy：用一两句中文描述应如何遍历它（如"用 sitemap 枚举全部页面再按需抓取"/"逐层读取目录页提取文件链接"）`,
     {
@@ -141,10 +329,11 @@ export async function classifySite(rootUrl: string): Promise<KbCrawlSite> {
       properties: {
         siteKind: { type: "STRING" },
         requiresLogin: { type: "BOOLEAN" },
+        loginUrl: { type: "STRING" },
         summary: { type: "STRING" },
         strategy: { type: "STRING" },
       },
-      required: ["siteKind", "requiresLogin", "summary", "strategy"],
+      required: ["siteKind", "requiresLogin", "loginUrl", "summary", "strategy"],
     },
     { thinking: "adaptive" },
   )
@@ -154,6 +343,7 @@ export async function classifySite(rootUrl: string): Promise<KbCrawlSite> {
     rootUrl,
     siteKind: out.siteKind,
     requiresLogin: out.requiresLogin,
+    loginUrl: out.loginUrl ? absolutize(rootUrl, out.loginUrl) || undefined : undefined,
     summary: out.summary,
     strategy: out.strategy,
     links: [],
@@ -197,8 +387,24 @@ export async function enumerateSite(
     }
   }
 
-  // 没有从 sitemap 拿到（或非 wiki）：BFS 抓目录/首页链接
+  // 没有从 sitemap 拿到（或非 wiki）：先做确定性翻页，再 BFS 抓目录/首页链接
   if (collected.size === 0) {
+    // 1) 确定性分页：检测 ?page=N / &page=N 形式的分页，算出最大页码后逐页抓取（参照旧项目翻 103 页）
+    const root = await rawFetch(site.rootUrl)
+    const pageUrls = enumeratePageUrls(site.rootUrl, root.body)
+    if (pageUrls.length > 1) {
+      await mapLimit(pageUrls, 6, async (pu) => {
+        if (collected.size >= maxLinks) return
+        const r = await rawFetch(pu)
+        for (const l of extractRawLinks(r.finalUrl || pu, r.body, r.contentType)) {
+          if (!l.url.startsWith(origin)) continue
+          if (collected.size >= maxLinks) break
+          collected.set(l.url, l)
+        }
+      })
+    }
+
+    // 2) BFS 逐层抓目录/首页链接（补充分页之外的链接）
     let frontier = [site.rootUrl]
     const visited = new Set<string>()
     for (let depth = 0; depth <= maxDepth && frontier.length > 0; depth++) {
@@ -362,8 +568,9 @@ export async function downloadToProject(url: string, subdir = ""): Promise<strin
   const ctrl = new AbortController()
   const t = setTimeout(() => ctrl.abort(), 120000)
   try {
+    const cookie = cookieHeader(url)
     const res = await fetch(url, {
-      headers: { "User-Agent": UA },
+      headers: { "User-Agent": UA, ...(cookie ? { Cookie: cookie } : {}) },
       redirect: "follow",
       signal: ctrl.signal,
     })

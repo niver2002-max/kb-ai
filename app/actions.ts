@@ -11,6 +11,8 @@ import {
   selectLinks,
   downloadToProject,
   fetchLinkContent,
+  loginSite,
+  isLoggedIn,
 } from "@/lib/kb/crawl"
 import {
   readIndex,
@@ -276,7 +278,7 @@ export async function startBuild(userPrompt: string) {
       `下面是初筛后的候选资料（含类型、相关性、说明）：\n\n${listCandidates(candidates)}\n\n` +
       `请基于这些资料，向用户提出 3-5 道**选择题**来澄清构建偏好，` +
       `例如：聚焦哪些主题/子系统、是否纳入低相关资料、知识库用途（速查/学习/问答）、` +
-      `详略程度、是否需要联网补充背景等。每题给出 2-5 个可选项，合适的设为多选。` +
+      `详略程��、是否需要联网补充背景等。每题给出 2-5 个可选项，合适的设为多选。` +
       `intro 用一��话概述初筛发现（共多少份、主要类型、初步判断）。用中文。`,
     QUESTIONS_SCHEMA,
     { thinking: "adaptive" },
@@ -572,6 +574,58 @@ export async function crawlSite(
     links,
     busy: undefined,
   })
+  return updated
+}
+
+// 服务端登录某抓取会话对应的站点（参照旧项目：账号密码 POST 登录，持有会话 cookie）。
+// email/password 留空则使用内置默认公开账号（若配置了 CRAWL_DEFAULT_EMAIL/PASSWORD）。
+export async function loginCrawlSite(
+  crawlId: string,
+  email?: string,
+  password?: string,
+) {
+  const site = await readCrawl(crawlId)
+  if (!site) throw new Error("抓取会话不存在")
+  const loginUrl = site.loginUrl || site.rootUrl
+  const finalEmail = (email || process.env.CRAWL_DEFAULT_EMAIL || "").trim()
+  const finalPassword = (password || process.env.CRAWL_DEFAULT_PASSWORD || "").trim()
+  if (!finalEmail || !finalPassword) {
+    throw new Error("请输入账号和密码（或在环境变量配置默认账号）")
+  }
+
+  await patchCrawl(crawlId, { busy: "服务端登录中" })
+  try {
+    const result = await loginSite(loginUrl, finalEmail, finalPassword)
+    await patchCrawl(crawlId, { loggedIn: result.ok, busy: undefined })
+    return { ok: result.ok, message: result.message, site: await readCrawl(crawlId) }
+  } catch (err) {
+    await patchCrawl(crawlId, { busy: undefined })
+    throw err
+  }
+}
+
+// 已登录后重新抓取：很多需登录站点登录后才会显示完整文件列表，需要重新枚举。
+export async function recrawlAfterLogin(crawlId: string, userPrompt: string) {
+  const site = await readCrawl(crawlId)
+  if (!site) throw new Error("抓取会话不存在")
+  await patchCrawl(crawlId, { busy: "登录后重新遍历中" })
+
+  const enumerated = await enumerateSite(site, {
+    maxLinks: 3000,
+    maxDepth: site.siteKind === "wiki" ? 0 : 2,
+  })
+  await patchCrawl(crawlId, { busy: "AI 按目标筛选链接中" })
+  const picked = await selectLinks(site, enumerated, userPrompt, 80)
+  // 登录后：开放文件与需登录文件都可由服务端下载（已持有会话）
+  const links = picked.map((l) => ({
+    ...l,
+    action:
+      l.action === "manual_download" && isLoggedIn(site.rootUrl)
+        ? ("server_download" as const)
+        : l.action,
+    picked: l.action === "fetch" || l.action === "server_download" || l.action === "manual_download",
+  }))
+  const updated = await patchCrawl(crawlId, { links, busy: undefined })
   return updated
 }
 
