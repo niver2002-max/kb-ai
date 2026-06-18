@@ -40,7 +40,17 @@ import {
   appendMessage,
   clearSession,
 } from "@/lib/kb/session"
-import type { KbSource, KbQuestion, KbCategory, KbLibrary } from "@/lib/kb/types"
+import { getSettings, updateSettings, type ApiSettings } from "@/lib/kb/settings"
+import {
+  testEndpoint as probeEndpoint,
+  listModels as probeListModels,
+  pingModel as probePingModel,
+  type EndpointTestResult,
+  type ModelInfo,
+  type ModelLiveResult,
+} from "@/lib/kb/api-probe"
+import { runIteration, DEFAULT_AUTO_ITERATE } from "@/lib/kb/auto-iterate"
+import type { KbSource, KbQuestion, KbCategory, KbLibrary, AutoIterateConfig } from "@/lib/kb/types"
 
 // ===================================================================
 // 多知识库管理
@@ -79,6 +89,85 @@ export async function createKbLibrary(input: {
 export async function deleteKbLibrary(id: string) {
   await deleteLibrary(id)
   return listLibraries()
+}
+
+// ===================================================================
+// API 设置 + 智能测试（测端点 / 列模型 / 测活模型）
+// ===================================================================
+
+export async function getApiSettings(): Promise<ApiSettings> {
+  return getSettings()
+}
+
+export async function saveApiSettings(partial: Partial<ApiSettings>): Promise<ApiSettings> {
+  return updateSettings(partial)
+}
+
+// 智能测端点：自动尝试多种端点路径变体，返回可用地址
+export async function testApiEndpoint(baseUrl: string, apiKey: string): Promise<EndpointTestResult> {
+  return probeEndpoint(baseUrl, apiKey)
+}
+
+// 智能列模型：列出端点下全部模型并标注可对话/可嵌入
+export async function listApiModels(
+  baseUrl: string,
+  apiKey: string,
+): Promise<{ ok: boolean; baseUrl: string; models: ModelInfo[]; message: string }> {
+  return probeListModels(baseUrl, apiKey)
+}
+
+// 智能测活：对一批模型并发发最小请求，返回存活与延迟
+export async function pingApiModels(
+  baseUrl: string,
+  apiKey: string,
+  models: Array<{ id: string; kind: "generate" | "embed" }>,
+): Promise<ModelLiveResult[]> {
+  return mapLimit(models, 4, (m) => probePingModel(baseUrl, apiKey, m.id, m.kind))
+}
+
+// ===================================================================
+// 后台自迭代（每库开关，默认关闭；开启即愿意持续消耗 token）
+// ===================================================================
+
+// 读取某库自迭代配置（缺省返回默认关闭配置）
+export async function getAutoIterate(libId: string): Promise<AutoIterateConfig> {
+  const lib = await getLibrary(libId)
+  return lib?.autoIterate ?? { ...DEFAULT_AUTO_ITERATE }
+}
+
+// 更新某库自迭代配置
+export async function setAutoIterate(
+  libId: string,
+  patch: Partial<AutoIterateConfig>,
+): Promise<AutoIterateConfig> {
+  const lib = await getLibrary(libId)
+  const current = lib?.autoIterate ?? { ...DEFAULT_AUTO_ITERATE }
+  const next: AutoIterateConfig = { ...current, ...patch }
+  await patchLibrary(libId, { autoIterate: next })
+  return next
+}
+
+// 记录前台互动时间（用于空闲判定）
+export async function markLibraryActive(libId: string): Promise<void> {
+  await patchLibrary(libId, { lastActiveAt: Date.now() })
+}
+
+// 调度检查：由前端轮询触发。判断各库是否满足"已启用 + 空闲足够久 + 距上次迭代够久"，满足则跑一次迭代。
+// 返回本次实际执行迭代的库结果。
+export async function tickAutoIterate(): Promise<Array<{ libId: string; result: string }>> {
+  const libs = await listLibraries()
+  const now = Date.now()
+  const out: Array<{ libId: string; result: string }> = []
+  for (const lib of libs) {
+    const cfg = lib.autoIterate
+    if (!cfg?.enabled || cfg.running) continue
+    const idleOk = now - (lib.lastActiveAt ?? 0) >= cfg.idleMinutes * 60_000
+    const intervalOk = now - (cfg.lastRunAt ?? 0) >= cfg.intervalMinutes * 60_000
+    if (!idleOk || !intervalOk) continue
+    const result = await runIteration(lib.id)
+    if (result) out.push({ libId: lib.id, result })
+  }
+  return out
 }
 
 // ===================================================================

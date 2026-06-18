@@ -10,31 +10,31 @@
 // 第三方端点配置：在 .env.local 设置 GEMINI_BASE_URL 指向你的中转地址，例如：
 //   GEMINI_BASE_URL=https://你的中转域名/v1beta  （也可只填域名，会自动补 /v1beta）
 // 不设置时回退到 Google 官方端点。
-const DEFAULT_BASE = "https://generativelanguage.googleapis.com/v1beta"
+import { getSettings } from "./settings"
 
-function normalizeBase(raw: string): string {
+// 端点规整：Gemini 原生协议要求带版本路径。若只填了域名（无 /v1beta 或 /v1），自动补 /v1beta，
+// 否则请求会打到中转站点的网页路由，返回 HTML 而非 JSON。
+export function normalizeBase(raw: string): string {
   let b = raw.trim().replace(/\/+$/, "") // 去掉末尾斜杠
-  // Gemini 原生协议要求带版本路径。若用户只填了域名（无 /v1beta 或 /v1），自动补 /v1beta，
-  // 否则请求会打到中转站点的网页路由，返回 HTML 而非 JSON。
   if (!/\/v1beta$|\/v1$|\/v1beta\/|\/v1\//.test(b)) {
     b = `${b}/v1beta`
   }
   return b
 }
 
-const BASE = normalizeBase(process.env.GEMINI_BASE_URL || DEFAULT_BASE)
-
-// 仅使用 Gemini 3.5 Flash 原生端点（非 chat 接口）
-export const GEMINI_MODEL = "gemini-3.5-flash"
-// 向量模型同样走 Gemini 原生端点
-export const GEMINI_EMBED_MODEL = "gemini-embedding-001"
-
-// 温度：可通过 GEMINI_TEMPERATURE 环境变量调节，默认 0（确定性强、适合事实型知识库问答，降低幻觉）。
-// ⚠️ Google 官方建议 Gemini 3 系列复杂推理/数学任务用 temperature=1.0；
-// 若发现循环或推理质量下降，把 GEMINI_TEMPERATURE 设为 1 即可，无需改代码。
-export const TEMPERATURE = Number.isFinite(Number(process.env.GEMINI_TEMPERATURE))
-  ? Number(process.env.GEMINI_TEMPERATURE)
-  : 0
+// 以下配置全部运行时从设置面板（.kb-data/settings.json）动态读取，回退环境变量。
+function BASE_URL(): string {
+  return normalizeBase(getSettings().baseUrl)
+}
+function MODEL(): string {
+  return getSettings().model
+}
+function EMBED_MODEL(): string {
+  return getSettings().embedModel
+}
+function temperature(): number {
+  return getSettings().temperature
+}
 
 // thinkingLevel：minimal | low | medium(默认) | high。
 // "adaptive" = 不固定档位，交给 Gemini 原生的「动态思考(dynamic thinking)」按问题复杂度自动调节，
@@ -43,10 +43,10 @@ export const TEMPERATURE = Number.isFinite(Number(process.env.GEMINI_TEMPERATURE
 export type ThinkingLevel = "minimal" | "low" | "medium" | "high" | "adaptive"
 
 function getApiKey(): string {
-  const key = process.env.GEMINI_API_KEY
+  const key = getSettings().apiKey
   if (!key) {
     throw new Error(
-      "缺少 GEMINI_API_KEY 环境变量。请在本地 .env.local 中设置你的 Gemini API Key。",
+      "尚未配置 API Key。请点击右上角「设置」配置并测试你的第三方 API，或在 .env.local 设置 GEMINI_API_KEY。",
     )
   }
   return key
@@ -76,7 +76,7 @@ function buildBody(
   contents: Array<{ role: string; parts: GenPart[] }>,
   opts: GenOpts,
 ): Record<string, unknown> {
-  const generationConfig: Record<string, unknown> = { temperature: TEMPERATURE }
+  const generationConfig: Record<string, unknown> = { temperature: temperature() }
   const tc = thinkingConfig(opts.thinking ?? "adaptive")
   if (tc) generationConfig.thinkingConfig = tc
   // 注意：responseSchema（结构化输出）与 tools（工具调用）互斥，不要同时传。
@@ -97,7 +97,7 @@ function buildBody(
 async function callGenerate(body: Record<string, unknown>): Promise<string> {
   // 带指数退避重试：第三方中转常出现瞬时 503/过载（system_cpu_overloaded），重试可显著提升成功率。
   const res = await fetchWithRetry(
-    `${BASE}/models/${GEMINI_MODEL}:generateContent`,
+    `${BASE_URL()}/models/${MODEL()}:generateContent`,
     {
       method: "POST",
       headers: {
@@ -113,7 +113,7 @@ async function callGenerate(body: Record<string, unknown>): Promise<string> {
   const looksLikeHtml = text.trimStart().startsWith("<")
   if (looksLikeHtml) {
     throw new Error(
-      `端点返回了 HTML 而非 JSON，说明 GEMINI_BASE_URL 路径不对（当前实际请求：${BASE}/models/${GEMINI_MODEL}）。` +
+      `端点返回了 HTML 而非 JSON，说明端点地址不对（当前实际请求：${BASE_URL()}/models/${MODEL()}）。` +
         `请确认中转地址正确，通常应形如 https://域名/v1beta。返回片段：${text.slice(0, 120)}`,
     )
   }
@@ -297,16 +297,16 @@ export async function geminiStream(
   contents: Array<{ role: string; parts: GenPart[] }>,
   opts: GenOpts = {},
 ): Promise<ReadableStream<Uint8Array>> {
-  const streamEnabled = (process.env.GEMINI_STREAM ?? "true").toLowerCase() !== "false"
+  const streamEnabled = getSettings().stream
   if (!streamEnabled) {
-    console.log("[v0] GEMINI_STREAM=false，直接走非流式")
+    console.log("[v0] 流式已关闭，直接走非流式")
     return sliceToStream(await geminiContents(contents, opts))
   }
 
   const body = buildBody(contents, opts)
   let res: Response
   try {
-    res = await fetch(`${BASE}/models/${GEMINI_MODEL}:streamGenerateContent?alt=sse`, {
+    res = await fetch(`${BASE_URL()}/models/${MODEL()}:streamGenerateContent?alt=sse`, {
       method: "POST",
       headers: { "Content-Type": "application/json", "x-goog-api-key": getApiKey() },
       body: JSON.stringify(body),
@@ -417,8 +417,9 @@ export async function geminiEmbedOne(
   text: string,
   taskType: "RETRIEVAL_DOCUMENT" | "RETRIEVAL_QUERY" = "RETRIEVAL_QUERY",
 ): Promise<number[]> {
+  const embedModel = EMBED_MODEL()
   const res = await fetchWithRetry(
-    `${BASE}/models/${GEMINI_EMBED_MODEL}:embedContent`,
+    `${BASE_URL()}/models/${embedModel}:embedContent`,
     {
       method: "POST",
       headers: {
@@ -426,7 +427,7 @@ export async function geminiEmbedOne(
         "x-goog-api-key": getApiKey(),
       },
       body: JSON.stringify({
-        model: `models/${GEMINI_EMBED_MODEL}`,
+        model: `models/${embedModel}`,
         content: { parts: [{ text }] },
         taskType,
       }),
@@ -446,8 +447,9 @@ export async function geminiEmbedBatch(texts: string[]): Promise<number[][]> {
   for (let i = 0; i < texts.length; i += BATCH) {
     const slice = texts.slice(i, i + BATCH)
     try {
+      const embedModel = EMBED_MODEL()
       const res = await fetchWithRetry(
-        `${BASE}/models/${GEMINI_EMBED_MODEL}:batchEmbedContents`,
+        `${BASE_URL()}/models/${embedModel}:batchEmbedContents`,
         {
           method: "POST",
           headers: {
@@ -456,7 +458,7 @@ export async function geminiEmbedBatch(texts: string[]): Promise<number[][]> {
           },
           body: JSON.stringify({
             requests: slice.map((text) => ({
-              model: `models/${GEMINI_EMBED_MODEL}`,
+              model: `models/${embedModel}`,
               content: { parts: [{ text }] },
               taskType: "RETRIEVAL_DOCUMENT",
             })),

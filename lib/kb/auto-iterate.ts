@@ -3,19 +3,15 @@ import path from "node:path"
 import type { AutoIterateTask, KbLibrary } from "./types"
 import { getLibrary, patchLibrary } from "./library"
 import { readIndex, writeIndex, updateSource } from "./store"
-import { geminiText, geminiSearch } from "./gemini"
-import { embedSegments } from "./embed"
+import { geminiText, geminiSearch, geminiEmbedBatch } from "./gemini"
 
-// 默认配置
+// 默认配置（用户开启即代表愿意持续消耗 token，因此任务全量处理、不做省 token 的小批量限制）
 export const DEFAULT_AUTO_ITERATE = {
   enabled: false,
   tasks: ["notes", "gaps", "reindex"] as AutoIterateTask[],
-  intervalMinutes: 60,
-  idleMinutes: 15,
+  intervalMinutes: 30,
+  idleMinutes: 10,
 }
-
-// 每次迭代处理的来源/片段上限（控制 token 消耗）
-const BATCH = 3
 
 function nowStamp(): string {
   return new Date().toISOString().replace(/[:.]/g, "-").slice(0, 19)
@@ -33,23 +29,22 @@ async function writeNote(lib: KbLibrary, name: string, body: string): Promise<st
 // ===== 任务一：为缺少摘要的来源生成笔记 =====
 async function taskNotes(lib: KbLibrary): Promise<string> {
   const index = await readIndex(lib.id)
-  // 已入库但还没有 note 的来源
-  const targets = index.sources
-    .filter((s) => s.status === "embedded" && !s.note)
-    .slice(0, BATCH)
+  // 已入库但还没有 note 的来源（全量处理）
+  const targets = index.sources.filter((s) => s.status === "embedded" && !s.note)
   if (targets.length === 0) return "笔记：所有来源均已有摘要，无需补全"
 
   let done = 0
   for (const src of targets) {
+    // 用该来源的全部片段，给足上下文
     const chunks = index.chunks
       .filter((c) => c.sourceId === src.id)
-      .slice(0, 12)
       .map((c) => c.text)
       .join("\n\n")
     if (!chunks.trim()) continue
     const summary = await geminiText(
-      `你在维护一个知识库（面向：${lib.audience || "通用"}）。请为以下资料生成一份简洁的中文笔记，` +
-        `包含：一句话概述、3-6 个要点、与其它主题的关联线索。资料名：${src.name}\n\n内容：\n"""${chunks.slice(0, 12000)}"""`,
+      `你在维护一个知识库（面向：${lib.audience || "通用"}）。请为以下资料生成一份详尽的中文笔记，` +
+        `包含：一句话概述、核心要点（尽量完整）、关键术语解释、与其它主题的关联线索、可延伸阅读方向。` +
+        `资料名：${src.name}\n\n内容：\n"""${chunks}"""`,
       { thinking: "adaptive" },
     )
     await writeNote(
@@ -72,43 +67,54 @@ async function taskGaps(lib: KbLibrary): Promise<string> {
   // 用现有来源标题 + 分类，让模型找出明显缺口
   const inventory = index.sources.map((s) => `- ${s.name}（${s.category}）`).join("\n")
   const cats = index.workflow.categories.map((c) => c.name).join("、") || "（未分类）"
-  const gapJson = await geminiText(
+  // 一次找出多个缺口（最多 5 个），逐个联网补全
+  const gapsRaw = await geminiText(
     `这是一个知识库（面向：${lib.audience || "通用"}），现有资料清单：\n${inventory}\n\n` +
-      `现有分类：${cats}\n\n请指出最重要的 1 个知识缺口（现有资料明显缺失、但对该知识库目标很关键的主题），` +
-      `只回复这个缺口的简短主题词（一行，不超过 30 字）。`,
+      `现有分类：${cats}\n\n请指出最重要的 3-5 个知识缺口（现有资料明显缺失、但对该知识库目标很关键的主题）。` +
+      `每行一个缺口的简短主题词（不超过 30 字），不要编号、不要解释。`,
     { thinking: "adaptive" },
   )
-  const gap = gapJson.split("\n").find((l) => l.trim())?.trim().slice(0, 60)
-  if (!gap) return "缺口：未识别到明显缺口"
+  const gaps = gapsRaw
+    .split("\n")
+    .map((l) => l.replace(/^[-*\d.、)\s]+/, "").trim())
+    .filter(Boolean)
+    .slice(0, 5)
+  if (gaps.length === 0) return "缺口：未识别到明显缺口"
 
-  // 联网检索补充
-  const supplement = await geminiSearch(
-    `围绕「${gap}」，面向「${lib.audience || "通用"}」整理一份准确、可引用的中文资料综述，` +
-      `包含关键概念、要点与权威来源链接。`,
-  )
-  const file = await writeNote(
-    lib,
-    `gap-${nowStamp()}.md`,
-    `# 知识缺口补充：${gap}\n\n> 自动联网补充于 ${new Date().toLocaleString()}\n\n${supplement}\n`,
-  )
-  return `缺口：补充了「${gap}」→ ${path.basename(file)}`
+  let filled = 0
+  for (const gap of gaps) {
+    const supplement = await geminiSearch(
+      `围绕「${gap}」，面向「${lib.audience || "通用"}」整理一份准确、可引用的中文资料综述，` +
+        `包含关键概念、要点、常见误区与权威来源链接。`,
+    )
+    await writeNote(
+      lib,
+      `gap-${nowStamp()}-${gap.replace(/[^\w\u4e00-\u9fa5]+/g, "_").slice(0, 24)}.md`,
+      `# 知识缺口补充：${gap}\n\n> 自动联网补充于 ${new Date().toLocaleString()}\n\n${supplement}\n`,
+    )
+    filled++
+  }
+  return `缺口：识别并联网补充了 ${filled} 个缺口（${gaps.join("、")}）`
 }
 
 // ===== 任务三：重建索引 / 去重 =====
 async function taskReindex(lib: KbLibrary): Promise<string> {
   const index = await readIndex(lib.id)
 
-  // 1) 补嵌入：为缺失 embedding 的片段重新嵌入
-  const missing = index.chunks.filter((c) => !c.embedding || c.embedding.length === 0).slice(0, 30)
+  // 1) 补嵌入：为所有缺失 embedding 的片段重新嵌入（全量）
+  const missing = index.chunks.filter((c) => !c.embedding || c.embedding.length === 0)
   let embedded = 0
   if (missing.length > 0) {
-    const segs = missing.map((c) => ({ text: c.text, loc: c.loc }))
-    const vectors = await embedSegments(segs)
-    for (let i = 0; i < missing.length; i++) {
-      if (vectors[i]?.embedding?.length) {
-        missing[i].embedding = vectors[i].embedding
-        embedded++
+    try {
+      const vectors = await geminiEmbedBatch(missing.map((c) => c.text))
+      for (let i = 0; i < missing.length; i++) {
+        if (vectors[i]?.length) {
+          missing[i].embedding = vectors[i]
+          embedded++
+        }
       }
+    } catch (e) {
+      return `重建索引：补嵌入失败 - ${e instanceof Error ? e.message : "未知错误"}`
     }
   }
 
