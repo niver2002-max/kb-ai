@@ -57,6 +57,37 @@ jobs:
           cp -r .next/static "$DIST/.next/static"
           if [ -d public ]; then cp -r public "$DIST/public"; fi
 
+          # Next 16/Turbopack 的 standalone 依赖追踪偶尔会漏掉运行时必需的包
+          # （典型：@swc/helpers、tslib），导致本地启动报 "Cannot find module"。
+          # 注意：pnpm 用 .pnpm 软链结构，顶层 node_modules 不含间接依赖，
+          # 因此需从 .pnpm store 里按 glob 解析真实路径再补齐。
+          ensure_pkg() {
+            local pkg="$1"            # 例如 @swc/helpers
+            local store_name="$2"     # .pnpm 目录名前缀，例如 @swc+helpers
+            if [ -d "$DIST/node_modules/$pkg" ]; then return 0; fi
+            # 优先用顶层（npm/yarn 扁平结构），否则回退 pnpm store
+            local src=""
+            if [ -d "node_modules/$pkg" ]; then
+              src="node_modules/$pkg"
+            else
+              src=$(ls -d node_modules/.pnpm/${store_name}@*/node_modules/$pkg 2>/dev/null | head -1)
+            fi
+            if [ -n "$src" ] && [ -d "$src" ]; then
+              echo "Backfilling missing dependency: $pkg (from $src)"
+              mkdir -p "$DIST/node_modules/$(dirname "$pkg")"
+              cp -rL "$src" "$DIST/node_modules/$pkg"
+            fi
+          }
+          ensure_pkg "@swc/helpers" "@swc+helpers"
+          ensure_pkg "tslib" "tslib"
+          ensure_pkg "styled-jsx" "styled-jsx"
+
+          # 兜底校验：确认报错涉及的关键模块确实已就位，否则让构建失败而不是发出坏包。
+          if [ ! -f "$DIST/node_modules/@swc/helpers/package.json" ]; then
+            echo "ERROR: @swc/helpers missing from release bundle" >&2
+            exit 1
+          fi
+
           # Windows 一键启动脚本（双击运行）。默认端口 3000，可用 set PORT=xxxx 覆盖。
           # 注意：脚本内容必须全为 ASCII 英文。cmd.exe 按本地代码页逐字节解析 .bat，
           # 中文字符会被当成命令导致报错（如 'tart' is not recognized），因此一律用英文。
