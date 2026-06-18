@@ -1,0 +1,13 @@
+[
+  {
+    "id": "lib-mqk3ba30-8l1le",
+    "title": "FPGA 开发资料",
+    "audience": "嵌入式工程师，收集 Tang FPGA 数据手册与教程",
+    "rootDir": "/tmp/kb-test-fpga",
+    "hasGit": false,
+    "initialized": true,
+    "sourceMode": "materials",
+    "createdAt": 1781822839500,
+    "updatedAt": 1781822839613
+  }
+]

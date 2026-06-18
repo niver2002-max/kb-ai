@@ -1,6 +1,6 @@
 "use client"
 
-import { useState, useTransition } from "react"
+import { useState, useEffect, useTransition } from "react"
 import { toast } from "sonner"
 import {
   classifyOnly,
@@ -10,6 +10,7 @@ import {
   getDownloadManifest,
   setCrawlLinkPicked,
   rescanDownloads,
+  suggestCrawlPrompts,
 } from "@/app/actions"
 import type { KbState } from "@/components/kb/knowledge-base"
 import type { KbCrawlSite, KbCrawlLink, LinkAction } from "@/lib/kb/types"
@@ -33,6 +34,11 @@ import {
   LogIn,
   ExternalLink,
   ArrowRightToLine,
+  Lightbulb,
+  ListChecks,
+  CheckCircle2,
+  ArrowRight,
+  MessageSquare,
 } from "lucide-react"
 
 // 站点类型中文标签
@@ -67,6 +73,24 @@ export function SiteCrawler({
   const [site, setSite] = useState<KbCrawlSite | null>(null)
   const [pending, startTransition] = useTransition()
   const [busyLabel, setBusyLabel] = useState("")
+  // AI 自动建议的提示词（点选即填入）
+  const [suggestions, setSuggestions] = useState<string[]>([])
+  const [loadingSug, setLoadingSug] = useState(false)
+  // 入库结果：本次抓取后已加入知识库的页面，便于"知道入了什么"
+  const [ingestResult, setIngestResult] = useState<{ names: string[]; failed: number } | null>(null)
+
+  // 进入页面即按知识库标题/用途预取建议提示词
+  useEffect(() => {
+    let alive = true
+    setLoadingSug(true)
+    suggestCrawlPrompts(libId)
+      .then((s) => alive && setSuggestions(s))
+      .catch(() => {})
+      .finally(() => alive && setLoadingSug(false))
+    return () => {
+      alive = false
+    }
+  }, [libId])
 
   const links = site?.links ?? []
   const fetchable = links.filter((l) => l.action === "fetch")
@@ -83,12 +107,17 @@ export function SiteCrawler({
       return
     }
     if (targetUrl) setUrl(targetUrl) // 深入子目录时同步输入框
+    setIngestResult(null)
     setBusyLabel("分诊站点类型中…")
     startTransition(async () => {
       try {
         const classified = await classifyOnly(libId, u)
         setSite(classified)
         toast.success(`分诊完成：${SITE_KIND_LABEL[classified.siteKind]}${classified.requiresLogin ? "（需登录）" : ""}`)
+        // 结合站点概况刷新更贴合的提示词建议
+        suggestCrawlPrompts(libId, classified.summary).then((s) => {
+          if (s.length) setSuggestions(s)
+        })
         setBusyLabel("遍历站点并按目标筛选中…")
         const result = await enumerateAndSelect(libId, classified.id, prompt.trim())
         if (result) setSite(result)
@@ -151,6 +180,11 @@ export function SiteCrawler({
       try {
         const r = await ingestFetchable(libId, site.id)
         if (r.site) setSite(r.site)
+        // 收集已入库页面名，便于让用户清楚"入了什么"
+        const names = (r.site?.links ?? site.links)
+          .filter((l) => l.action === "fetch" && l.ingested)
+          .map((l) => l.title || l.url)
+        setIngestResult({ names, failed: r.failed })
         toast.success(`已入库 ${r.ingested} 个页面${r.failed ? `，失败 ${r.failed}` : ""}`)
       } catch (e) {
         toast.error(e instanceof Error ? e.message : "入库失败")
@@ -201,7 +235,7 @@ export function SiteCrawler({
         let fail = 0
         for (const it of items) {
           try {
-            // 同域已登录 → 浏览器自动带 cookie；跨域无 CORS 时用 no-cors 兜底（拿不到内容则失败）
+            // 同域已登录 → 浏览器自动带 cookie；跨域无 CORS 时用 no-cors 兜底（拿不到内容���失败）
             const res = await fetch(it.url, { credentials: "include" })
             if (!res.ok) throw new Error(String(res.status))
             const blob = await res.blob()
@@ -294,6 +328,26 @@ export function SiteCrawler({
               disabled={pending}
               rows={2}
             />
+            {/* AI 建议提示词：点选即填入 */}
+            {(loadingSug || suggestions.length > 0) && (
+              <div className="flex flex-wrap items-center gap-1.5">
+                <span className="flex items-center gap-1 text-xs text-muted-foreground">
+                  <Lightbulb className="size-3.5" />
+                  {loadingSug ? "AI 正在生成建议…" : "试试："}
+                </span>
+                {suggestions.map((s) => (
+                  <button
+                    key={s}
+                    type="button"
+                    disabled={pending}
+                    onClick={() => setPrompt(s)}
+                    className="rounded-full border border-dashed px-2.5 py-1 text-xs text-muted-foreground transition-colors hover:border-solid hover:bg-muted hover:text-foreground disabled:opacity-50"
+                  >
+                    {s}
+                  </button>
+                ))}
+              </div>
+            )}
           </div>
           <Button onClick={() => runCrawl()} disabled={pending} className="gap-2 self-start">
             {pending && busyLabel.includes("分诊") ? (
@@ -333,6 +387,63 @@ export function SiteCrawler({
           </p>
 
           <Separator />
+
+          {/* 抓取结果概览：各分类数量一目了然 */}
+          {links.length > 0 && (
+            <div className="flex flex-col gap-3 rounded-lg border bg-muted/30 p-4">
+              <div className="flex items-center gap-1.5 text-sm font-medium">
+                <ListChecks className="size-4" />
+                抓取结果概览
+                <span className="text-muted-foreground">
+                  · 共 {fetchable.length + serverDl.length + manualDl.length} 个文件、{traverse.length} 个子目录
+                </span>
+              </div>
+              <div className="flex flex-wrap gap-2">
+                <CountChip cls={ACTION_META.fetch.cls} label="可在线识别" total={fetchable.length} picked={fetchable.filter((l) => l.picked && !l.ingested).length} done={fetchable.filter((l) => l.ingested).length} doneLabel="已入库" />
+                <CountChip cls={ACTION_META.server_download.cls} label="开放可下载" total={serverDl.length} picked={serverDl.filter((l) => l.picked && !l.downloaded).length} done={serverDl.filter((l) => l.downloaded).length} doneLabel="已下载" />
+                <CountChip cls={ACTION_META.manual_download.cls} label="需手动下载" total={manualDl.length} picked={manualDl.filter((l) => l.picked).length} />
+                <CountChip cls={ACTION_META.traverse.cls} label="子目录" total={traverse.length} />
+              </div>
+              {/* 下一步建议横幅 */}
+              <NextStep
+                pendingFetch={fetchable.filter((l) => l.picked && !l.ingested).length}
+                pendingServer={serverDl.filter((l) => l.picked && !l.downloaded).length}
+                pendingManual={manualDl.filter((l) => l.picked).length}
+                requiresLogin={site.requiresLogin}
+                anyIngested={fetchable.some((l) => l.ingested) || serverDl.some((l) => l.downloaded)}
+              />
+            </div>
+          )}
+
+          {/* 入库结果回执：清楚展示"入了什么" */}
+          {ingestResult && (
+            <div className="flex flex-col gap-2 rounded-lg border border-emerald-500/30 bg-emerald-500/5 p-4">
+              <div className="flex items-center gap-1.5 text-sm font-medium text-emerald-700 dark:text-emerald-300">
+                <CheckCircle2 className="size-4" />
+                已加入知识库 {ingestResult.names.length} 个页面
+                {ingestResult.failed > 0 && (
+                  <span className="text-amber-600 dark:text-amber-400">（{ingestResult.failed} 个失败）</span>
+                )}
+              </div>
+              {ingestResult.names.length > 0 && (
+                <div className="flex max-h-32 flex-col gap-1 overflow-y-auto">
+                  {ingestResult.names.slice(0, 30).map((n, i) => (
+                    <div key={i} className="flex items-center gap-1.5 text-xs text-muted-foreground">
+                      <FileSearch className="size-3 shrink-0" />
+                      <span className="truncate">{n}</span>
+                    </div>
+                  ))}
+                  {ingestResult.names.length > 30 && (
+                    <span className="text-xs text-muted-foreground">…等共 {ingestResult.names.length} 个</span>
+                  )}
+                </div>
+              )}
+              <div className="flex items-center gap-1.5 rounded-md bg-background/60 px-3 py-2 text-xs text-muted-foreground">
+                <MessageSquare className="size-3.5 shrink-0" />
+                下一步：关闭本窗口，直接在对话中向知识库提问；这些内容已可被检索引用。
+              </div>
+            </div>
+          )}
 
           {/* 操作按钮区 */}
           <div className="flex flex-wrap gap-2">
@@ -408,6 +519,75 @@ export function SiteCrawler({
           </div>
         </Card>
       )}
+    </div>
+  )
+}
+
+// 分类计数芯片：展示总数 / 已选待处理 / 已完成
+function CountChip({
+  cls,
+  label,
+  total,
+  picked,
+  done,
+  doneLabel,
+}: {
+  cls: string
+  label: string
+  total: number
+  picked?: number
+  done?: number
+  doneLabel?: string
+}) {
+  if (total === 0) return null
+  return (
+    <div className={`flex items-center gap-1.5 rounded-md px-2.5 py-1.5 text-xs font-medium ${cls}`}>
+      <span>{label}</span>
+      <span className="font-mono">{total}</span>
+      {typeof picked === "number" && picked > 0 && (
+        <span className="rounded bg-background/40 px-1 font-mono">待处理 {picked}</span>
+      )}
+      {typeof done === "number" && done > 0 && (
+        <span className="rounded bg-background/40 px-1 font-mono">
+          {doneLabel} {done}
+        </span>
+      )}
+    </div>
+  )
+}
+
+// 下一步建议横幅：根据当前可处理项给出最该做的动作
+function NextStep({
+  pendingFetch,
+  pendingServer,
+  pendingManual,
+  requiresLogin,
+  anyIngested,
+}: {
+  pendingFetch: number
+  pendingServer: number
+  pendingManual: number
+  requiresLogin: boolean
+  anyIngested: boolean
+}) {
+  let text = ""
+  if (pendingFetch > 0) {
+    text = `下一步：点下方「在线识别入库」，把 ${pendingFetch} 个可识别页面加入知识库。`
+  } else if (pendingServer > 0) {
+    text = `下一步：点下方「服务端下载」，把 ${pendingServer} 个开放文件下载到项目并入库。`
+  } else if (pendingManual > 0) {
+    text = requiresLogin
+      ? `下一步：先在浏览器登录该网站，再点「一键批量下载到项目」下载 ${pendingManual} 个受保护文件。`
+      : `下一步：点「一键批量下载到项目」下载 ${pendingManual} 个文件。`
+  } else if (anyIngested) {
+    text = "已处理完所选内容，可关闭本窗口在对话中提问，或勾选更多链接继续。"
+  } else {
+    text = "请在下方各主题分组中勾选想要的链接（可整组全选），再选择上方对应的处理动作。"
+  }
+  return (
+    <div className="flex items-start gap-2 rounded-md border border-foreground/15 bg-background/60 px-3 py-2.5 text-sm">
+      <ArrowRight className="mt-0.5 size-4 shrink-0 text-foreground" />
+      <span className="leading-relaxed">{text}</span>
     </div>
   )
 }

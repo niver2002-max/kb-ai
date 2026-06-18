@@ -895,6 +895,41 @@ export async function getCrawlState(libId: string, crawlId: string) {
   return readCrawl(libId, crawlId)
 }
 
+// 自动建议抓取提示词：基于知识库标题/用途（及可选的站点概况），给出 3-4 条
+// 简短、具体、可直接点用的中文筛选目标，免去用户自己琢磨提示词。
+export async function suggestCrawlPrompts(
+  libId: string,
+  siteSummary?: string,
+): Promise<string[]> {
+  const lib = await getLibrary(libId)
+  const ctx = [
+    lib?.title ? `知识库标题：${lib.title}` : "",
+    lib?.audience ? `用途/受众：${lib.audience}` : "",
+    siteSummary ? `目标站点概况：${siteSummary}` : "",
+  ]
+    .filter(Boolean)
+    .join("\n")
+  try {
+    const out = await geminiJson<{ prompts: string[] }>(
+      `你在帮用户填写「网站抓取的筛选目标提示词」。请基于以下知识库信息，` +
+        `给出 3 条简短（每条不超过 25 字）、具体、可直接使用的中文提示词建议，` +
+        `聚焦该知识库最可能想从该网站收集的资料类型。只返回提示词本身，不要解释。\n` +
+        `${ctx || "（无额外信息，按通用资料整理）"}`,
+      {
+        type: "OBJECT",
+        properties: {
+          prompts: { type: "ARRAY", items: { type: "STRING" } },
+        },
+        required: ["prompts"],
+      },
+      { thinking: "adaptive" },
+    )
+    return (out.prompts || []).map((p) => p.trim()).filter(Boolean).slice(0, 4)
+  } catch {
+    return []
+  }
+}
+
 // 步骤一：仅分诊（快速返回）。
 export async function classifyOnly(libId: string, rootUrl: string) {
   const url = (rootUrl || "").trim()

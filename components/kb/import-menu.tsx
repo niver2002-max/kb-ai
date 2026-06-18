@@ -48,7 +48,7 @@ export function ImportMenu({
         导入材料
       </Button>
       <Dialog open={open} onOpenChange={setOpen}>
-        <DialogContent className="max-h-[88svh] max-w-3xl overflow-y-auto">
+        <DialogContent className="max-h-[90svh] w-[95vw] max-w-5xl overflow-y-auto sm:max-w-5xl">
           <DialogHeader>
             <DialogTitle>导入材料到知识库</DialogTitle>
             <DialogDescription>
