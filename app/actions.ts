@@ -477,8 +477,9 @@ function listCandidates(sources: KbSource[]): string {
 }
 
 // 阶段一：扫描结果已就绪 → 初筛 + 生成第一批澄清选择题
+// 提示词为空时，自动回退用知识库标题 + 用途作为筛选目标（无需用户再输入）。
 export async function startBuild(libId: string, userPrompt: string) {
-  const prompt = (userPrompt || "").trim()
+  const prompt = await resolveCrawlGoal(libId, userPrompt)
   await patchWorkflow(libId, { stage: "idle", userPrompt: prompt, busy: "初筛中" })
 
   await screenSources(libId, prompt)
@@ -760,6 +761,9 @@ export async function classifyOnly(libId: string, rootUrl: string) {
 }
 
 // 步骤二：枚举 + 按目标选取（较慢，单独触发）。
+// 自动穿透所有子目录：枚举本身深度遍历；选取后若仍有子目录(traverse)，
+// 自动递归深入并合并结果，直到无新子目录或达到安全上限——用户无需手点「深入」。
+// 无提示词时：回退用知识库标题 + 用途作为筛选目标。
 export async function enumerateAndSelect(
   libId: string,
   crawlId: string,
@@ -769,15 +773,25 @@ export async function enumerateAndSelect(
   const site = await readCrawl(libId, crawlId)
   if (!site) throw new Error("抓取会话不存在")
 
+  // 提示词为空时，用知识库标题+用途作为隐式筛选目标（满足"无提示词也能按标题/描述筛选"）
+  const goal = await resolveCrawlGoal(libId, userPrompt)
+
   await patchCrawl(libId, site.id, { busy: "遍历站点中" })
+  const maxLinks = opts?.maxLinks ?? 4000
   const enumerated = await enumerateSite(site, {
-    maxLinks: opts?.maxLinks ?? 2000,
-    maxDepth: site.siteKind === "wiki" ? 0 : 2,
+    maxLinks,
+    // wiki 用 sitemap 全量；其它站点深度 BFS 自动穿透多层目录
+    maxDepth: site.siteKind === "wiki" ? 0 : 4,
   })
 
-  await patchCrawl(libId, site.id, { busy: "AI 按目标筛选链接中" })
-  const picked = await selectLinks(site, enumerated, userPrompt, opts?.maxPick ?? 60)
-  const links = picked.map((l) => ({
+  await patchCrawl(libId, site.id, { busy: "AI 按目标筛选并分类链接中" })
+  const maxPick = opts?.maxPick ?? 200
+  const picked = await selectLinks(site, enumerated, goal, maxPick)
+
+  // 自动深入子目录：对 traverse 链接递归枚举+筛选，合并去重，直到无新子目录或达上限
+  const all = await autoTraverse(site, picked, goal, { maxLinks, maxPick })
+
+  const links = all.map((l) => ({
     ...l,
     picked:
       l.action === "fetch" ||
@@ -787,6 +801,61 @@ export async function enumerateAndSelect(
 
   const updated = await patchCrawl(libId, site.id, { links, busy: undefined })
   return updated
+}
+
+// 解析抓取目标：有用户提示词则用之；否则回退知识库标题 + 用途。
+async function resolveCrawlGoal(libId: string, userPrompt: string): Promise<string> {
+  const p = (userPrompt || "").trim()
+  if (p) return p
+  const lib = await getLibrary(libId)
+  if (lib) {
+    const parts = [lib.title, lib.audience].map((s) => (s || "").trim()).filter(Boolean)
+    if (parts.length) return parts.join(" —— ")
+  }
+  return "通用整理"
+}
+
+// 自动穿透子目录：递归深入 traverse 链接，合并新发现的链接（按 url 去重），带安全上限。
+async function autoTraverse(
+  site: import("@/lib/kb/types").KbCrawlSite,
+  picked: import("@/lib/kb/types").KbCrawlLink[],
+  goal: string,
+  limits: { maxLinks: number; maxPick: number },
+): Promise<import("@/lib/kb/types").KbCrawlLink[]> {
+  const byUrl = new Map<string, import("@/lib/kb/types").KbCrawlLink>()
+  for (const l of picked) byUrl.set(l.url, l)
+
+  const visited = new Set<string>([site.rootUrl])
+  // 最多自动深入的子目录数与层数，避免无限/海量抓取
+  const MAX_TRAVERSE = 40
+  let traversedCount = 0
+  const MAX_DEPTH = 3
+
+  for (let depth = 0; depth < MAX_DEPTH; depth++) {
+    const dirs = Array.from(byUrl.values()).filter(
+      (l) => l.action === "traverse" && !visited.has(l.url),
+    )
+    if (dirs.length === 0) break
+
+    for (const dir of dirs) {
+      if (traversedCount >= MAX_TRAVERSE || byUrl.size >= limits.maxLinks) break
+      visited.add(dir.url)
+      traversedCount++
+      try {
+        const subSite = { ...site, rootUrl: dir.url }
+        const subEnum = await enumerateSite(subSite, { maxLinks: 800, maxDepth: 1 })
+        const subPicked = await selectLinks(subSite, subEnum, goal, limits.maxPick)
+        for (const l of subPicked) {
+          if (byUrl.size >= limits.maxLinks) break
+          if (!byUrl.has(l.url)) byUrl.set(l.url, l)
+        }
+      } catch {
+        // 单个子目录失败不影响整体
+      }
+    }
+  }
+
+  return Array.from(byUrl.values())
 }
 
 // 一键抓取（兼容旧调用）：分诊 → 枚举 → 选取。

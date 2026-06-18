@@ -132,6 +132,7 @@ export interface KbCrawlLink {
   ext?: string
   action: LinkAction
   relevance?: number // 0-1，AI 按提示词目标评估
+  group?: string // AI 归类的主题分组（用于按分类分组展示，而非平铺几百条）
   note?: string
   // 处理状态
   picked?: boolean // 用户是否勾选

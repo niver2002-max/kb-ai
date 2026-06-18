@@ -389,7 +389,7 @@ export async function selectLinks(
       .join("\n")
 
     const out = await geminiJson<{
-      items: Array<{ index: number; action: LinkAction; relevance: number; note: string }>
+      items: Array<{ index: number; action: LinkAction; relevance: number; group: string; note: string }>
     }>(
       `用户的知识库目标：「${userPrompt || "通用整理"}」。\n` +
         `站点类型：${site.siteKind}，是否需要登录下载：${site.requiresLogin}。\n` +
@@ -397,6 +397,8 @@ export async function selectLinks(
         `- action：fetch(网页/PDF等可在线抓取识别) | server_download(开放且无需登录的二进制文件，服务端可直接下载) | ` +
         `manual_download(需登录或无法在线识别，需用户在浏览器端下载) | traverse(子目录/列表页，需进一步遍历) | skip(无关)\n` +
         `- relevance：与用户目标的相关性 0-1\n` +
+        `- group：用 2-6 字的中文主题词为该链接归类（例如「数据手册」「教程」「固件」「API 参考」），` +
+        `便于用户按主题分组挑选而非逐条勾选。同类内容务必使用完全相同的 group 名称。\n` +
         `- note：一句话中文说明\n` +
         `判定原则：若站点需要登录，其文件类链接多为 manual_download；开放下载站的文件用 server_download；` +
         `文档/正文页用 fetch；目录/列表页用 traverse；与目标明显无关的用 skip。\n\n${listing}`,
@@ -411,9 +413,10 @@ export async function selectLinks(
                 index: { type: "INTEGER" },
                 action: { type: "STRING" },
                 relevance: { type: "NUMBER" },
+                group: { type: "STRING" },
                 note: { type: "STRING" },
               },
-              required: ["index", "action", "relevance", "note"],
+              required: ["index", "action", "relevance", "group", "note"],
             },
           },
         },
@@ -429,6 +432,7 @@ export async function selectLinks(
         ...link,
         action: item.action,
         relevance: item.relevance,
+        group: (item.group || "").trim() || "其它",
         note: item.note,
       })
     }
