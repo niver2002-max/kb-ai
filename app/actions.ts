@@ -541,40 +541,55 @@ export async function getCrawlState(crawlId: string) {
   return site
 }
 
-// 一键抓取：分诊 → 枚举 → 按提示词选取。maxLinks 控制枚举上限，maxPick 控制最终保留数。
+// 步骤一：仅分诊（快速返回）。判断站点类型、是否需登录、登录页，立即给用户反馈。
+// 需登录的站点可在此步后先登录，再枚举（登录后才能看到完整清单）。
+export async function classifyOnly(rootUrl: string) {
+  const url = (rootUrl || "").trim()
+  if (!/^https?:\/\//i.test(url)) throw new Error("请输入有效的 http(s) 网址")
+  const site = await classifySite(url)
+  await upsertCrawl(site)
+  return site
+}
+
+// 步骤二：枚举 + 按目标选取（较慢，单独触发，便于显示进度）。
+// maxLinks 控制枚举上限，maxPick 控制最终保留数。
+export async function enumerateAndSelect(
+  crawlId: string,
+  userPrompt: string,
+  opts?: { maxLinks?: number; maxPick?: number },
+) {
+  const site = await readCrawl(crawlId)
+  if (!site) throw new Error("抓取会话不存在")
+
+  await patchCrawl(site.id, { busy: "遍历站点中" })
+  const enumerated = await enumerateSite(site, {
+    maxLinks: opts?.maxLinks ?? 2000,
+    maxDepth: site.siteKind === "wiki" ? 0 : 2,
+  })
+
+  await patchCrawl(site.id, { busy: "AI 按目标筛选链接中" })
+  const picked = await selectLinks(site, enumerated, userPrompt, opts?.maxPick ?? 60)
+  // 已登录则需登录文件也可服务端下载
+  const loggedIn = isLoggedIn(site.rootUrl)
+  const links = picked.map((l) => ({
+    ...l,
+    action:
+      l.action === "manual_download" && loggedIn ? ("server_download" as const) : l.action,
+    picked: l.action === "fetch" || l.action === "server_download" || (loggedIn && l.action === "manual_download"),
+  }))
+
+  const updated = await patchCrawl(site.id, { links, busy: undefined })
+  return updated
+}
+
+// 一键抓取（兼容旧调用）：分诊 → 枚举 → 选取。
 export async function crawlSite(
   rootUrl: string,
   userPrompt: string,
   opts?: { maxLinks?: number; maxPick?: number },
 ) {
-  const url = (rootUrl || "").trim()
-  if (!/^https?:\/\//i.test(url)) throw new Error("请输入有效的 http(s) 网址")
-
-  // 1) 分诊
-  const site = await classifySite(url)
-  site.busy = "遍历站点中"
-  await upsertCrawl(site)
-
-  // 2) 枚举
-  const enumerated = await enumerateSite(site, {
-    maxLinks: opts?.maxLinks ?? 2000,
-    maxDepth: site.siteKind === "wiki" ? 0 : 2,
-  })
-  await patchCrawl(site.id, { busy: "AI 按目标筛选链接中" })
-
-  // 3) AI 选取 + 分类动作
-  const picked = await selectLinks(site, enumerated, userPrompt, opts?.maxPick ?? 60)
-  // 默认勾选可在线识别与开放下载的高相关项
-  const links = picked.map((l) => ({
-    ...l,
-    picked: l.action === "fetch" || l.action === "server_download",
-  }))
-
-  const updated = await patchCrawl(site.id, {
-    links,
-    busy: undefined,
-  })
-  return updated
+  const site = await classifyOnly(rootUrl)
+  return enumerateAndSelect(site.id, userPrompt, opts)
 }
 
 // 服务端登录某抓取会话对应的站点（参照旧项目：账号密码 POST 登录，持有会话 cookie）。

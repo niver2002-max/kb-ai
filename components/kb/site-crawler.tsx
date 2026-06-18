@@ -3,14 +3,14 @@
 import { useState, useTransition } from "react"
 import { toast } from "sonner"
 import {
-  crawlSite,
+  classifyOnly,
+  enumerateAndSelect,
   ingestFetchable,
   serverDownload,
   getDownloadManifest,
   setCrawlLinkPicked,
   rescanDownloads,
   loginCrawlSite,
-  recrawlAfterLogin,
 } from "@/app/actions"
 import type { KbState } from "@/components/kb/knowledge-base"
 import type { KbCrawlSite, KbCrawlLink, LinkAction } from "@/lib/kb/types"
@@ -75,6 +75,8 @@ export function SiteCrawler({
   const manualDl = links.filter((l) => l.action === "manual_download")
   const traverse = links.filter((l) => l.action === "traverse")
 
+  // 步骤一：分诊（快速）。识别站点类型/是否需登录后立即反馈；
+  // 开放站点直接继续枚举，需登录站点则停下等用户先登录。
   function runCrawl(targetUrl?: string) {
     const u = (targetUrl ?? url).trim()
     if (!/^https?:\/\//i.test(u)) {
@@ -82,14 +84,41 @@ export function SiteCrawler({
       return
     }
     if (targetUrl) setUrl(targetUrl) // 深入子目录时同步输入框
-    setBusyLabel(targetUrl ? "深入抓取子目录中…" : "分诊并遍历站点中…")
+    setBusyLabel("分诊站点类型中…")
     startTransition(async () => {
       try {
-        const result = await crawlSite(u, prompt.trim())
-        setSite(result)
-        toast.success(`分诊完成：${SITE_KIND_LABEL[result?.siteKind ?? "unknown"]}，发现 ${result?.links.length ?? 0} 条相关链接`)
+        const classified = await classifyOnly(u)
+        setSite(classified)
+        toast.success(`分诊完成：${SITE_KIND_LABEL[classified.siteKind]}${classified.requiresLogin ? "（需登录）" : ""}`)
+        // 需登录站点：先停下，等用户登录后再枚举（登录后才看得到完整清单）
+        if (classified.requiresLogin && !classified.loggedIn) {
+          setBusyLabel("")
+          return
+        }
+        // 开放站点：直接枚举并筛选
+        setBusyLabel("遍历站点并按目标筛选中…")
+        const result = await enumerateAndSelect(classified.id, prompt.trim())
+        if (result) setSite(result)
+        toast.success(`发现 ${result?.links.length ?? 0} 条相关链接`)
       } catch (e) {
         toast.error(e instanceof Error ? e.message : "抓取失败")
+      } finally {
+        setBusyLabel("")
+      }
+    })
+  }
+
+  // 手动触发枚举（需登录站点登录后，或用户想跳过登录直接枚举开放部分时）
+  function runEnumerate() {
+    if (!site) return
+    setBusyLabel("遍历站点并按目标筛选中…")
+    startTransition(async () => {
+      try {
+        const result = await enumerateAndSelect(site.id, prompt.trim())
+        if (result) setSite(result)
+        toast.success(`发现 ${result?.links.length ?? 0} 条相关链接`)
+      } catch (e) {
+        toast.error(e instanceof Error ? e.message : "枚举失败")
       } finally {
         setBusyLabel("")
       }
@@ -109,11 +138,12 @@ export function SiteCrawler({
           setBusyLabel("")
           return
         }
+        if (r.site) setSite(r.site)
         toast.success(r.message)
-        setBusyLabel("登录成功，重新遍历中…")
-        const updated = await recrawlAfterLogin(site.id, prompt.trim())
+        setBusyLabel("登录成功，遍历站点中…")
+        const updated = await enumerateAndSelect(site.id, prompt.trim())
         if (updated) setSite(updated)
-        toast.success("已用登录态重新枚举，受保护文件现可服务端下载")
+        toast.success("已用登录态枚举，受保护文件现可服务端下载")
       } catch (e) {
         toast.error(e instanceof Error ? e.message : "登录失败")
       } finally {
@@ -276,7 +306,7 @@ export function SiteCrawler({
             <Label htmlFor="crawl-prompt">抓取目标 / 提示词</Label>
             <Textarea
               id="crawl-prompt"
-              placeholder="例如：收集 Tang FPGA 的数据手册与引脚封装资料"
+              placeholder="例��：收集 Tang FPGA 的数据手册与引脚封装资料"
               value={prompt}
               onChange={(e) => setPrompt(e.target.value)}
               disabled={pending}
@@ -378,7 +408,10 @@ export function SiteCrawler({
                     />
                     <Button onClick={runLogin} disabled={pending} size="sm" className="gap-1.5">
                       <LogIn className="size-4" />
-                      登录并重新遍历
+                      登录并遍历
+                    </Button>
+                    <Button onClick={runEnumerate} disabled={pending} size="sm" variant="outline">
+                      跳过登录，仅枚举公开部分
                     </Button>
                   </div>
                 </>
@@ -389,6 +422,16 @@ export function SiteCrawler({
                   浏览器用同域登录态把文件写入 <code className="font-mono">downloads/</code>（被 CORS 拦截时降级为逐个下载）。
                 </p>
               )}
+            </div>
+          )}
+
+          {/* 已分诊但尚未枚举（需登录站点登录后会自动枚举；这里兜底提供手动触发） */}
+          {links.length === 0 && !site.requiresLogin && !busyLabel && (
+            <div className="rounded-md border border-border bg-muted/30 px-4 py-3 text-xs text-muted-foreground">
+              尚未枚举链接。
+              <Button onClick={runEnumerate} disabled={pending} size="sm" variant="link" className="h-auto px-1 py-0">
+                点此遍历并筛选
+              </Button>
             </div>
           )}
 
