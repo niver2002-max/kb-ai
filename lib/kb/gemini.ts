@@ -381,12 +381,43 @@ export async function geminiStream(
   })
 }
 
+// 带指数退避的重试：对 429/5xx 等瞬时错误重试，最多 attempts 次。
+async function fetchWithRetry(
+  url: string,
+  init: RequestInit,
+  label: string,
+  attempts = 4,
+): Promise<Response> {
+  let lastErr = ""
+  for (let i = 0; i < attempts; i++) {
+    try {
+      const res = await fetch(url, init)
+      if (res.ok) return res
+      // 仅对可重试状态码退避重试；其它直接抛
+      if (![408, 429, 500, 502, 503, 504].includes(res.status)) {
+        const detail = await res.text().catch(() => "")
+        throw new Error(`${label} 失败 (${res.status}): ${detail.slice(0, 300)}`)
+      }
+      lastErr = `${label} 临时错误 (${res.status})`
+    } catch (e) {
+      lastErr = (e as Error).message
+      // 非 HTTP 异常（网络等）也重试
+    }
+    if (i < attempts - 1) {
+      const delay = 500 * Math.pow(2, i) + Math.random() * 300
+      console.log(`[v0] ${label} 第 ${i + 1} 次失败，${Math.round(delay)}ms 后重试：${lastErr}`)
+      await new Promise((r) => setTimeout(r, delay))
+    }
+  }
+  throw new Error(`${label} 多次重试后仍失败：${lastErr}`)
+}
+
 // 单条文本向量
 export async function geminiEmbedOne(
   text: string,
   taskType: "RETRIEVAL_DOCUMENT" | "RETRIEVAL_QUERY" = "RETRIEVAL_QUERY",
 ): Promise<number[]> {
-  const res = await fetch(
+  const res = await fetchWithRetry(
     `${BASE}/models/${GEMINI_EMBED_MODEL}:embedContent`,
     {
       method: "POST",
@@ -400,44 +431,52 @@ export async function geminiEmbedOne(
         taskType,
       }),
     },
+    "Gemini embedContent",
   )
-  if (!res.ok) {
-    const detail = await res.text().catch(() => "")
-    throw new Error(`Gemini embedContent 失败 (${res.status}): ${detail.slice(0, 500)}`)
-  }
   const json = (await res.json()) as { embedding?: { values?: number[] } }
   return json.embedding?.values ?? []
 }
 
-// 批量文本向量（自动分批，单批上限 100 条）
+// 批量文本向量（自动分批，单批上限 100 条）。
+// 带重试；若某批 batchEmbedContents 始终失败（部分第三方中转不支持批量接口或不稳定），
+// 自动降级为逐条 embedContent，确保内容不丢失。
 export async function geminiEmbedBatch(texts: string[]): Promise<number[][]> {
   const out: number[][] = []
   const BATCH = 100
   for (let i = 0; i < texts.length; i += BATCH) {
     const slice = texts.slice(i, i + BATCH)
-    const res = await fetch(
-      `${BASE}/models/${GEMINI_EMBED_MODEL}:batchEmbedContents`,
-      {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          "x-goog-api-key": getApiKey(),
+    try {
+      const res = await fetchWithRetry(
+        `${BASE}/models/${GEMINI_EMBED_MODEL}:batchEmbedContents`,
+        {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            "x-goog-api-key": getApiKey(),
+          },
+          body: JSON.stringify({
+            requests: slice.map((text) => ({
+              model: `models/${GEMINI_EMBED_MODEL}`,
+              content: { parts: [{ text }] },
+              taskType: "RETRIEVAL_DOCUMENT",
+            })),
+          }),
         },
-        body: JSON.stringify({
-          requests: slice.map((text) => ({
-            model: `models/${GEMINI_EMBED_MODEL}`,
-            content: { parts: [{ text }] },
-            taskType: "RETRIEVAL_DOCUMENT",
-          })),
-        }),
-      },
-    )
-    if (!res.ok) {
-      const detail = await res.text().catch(() => "")
-      throw new Error(`Gemini batchEmbedContents 失败 (${res.status}): ${detail.slice(0, 500)}`)
+        "Gemini batchEmbedContents",
+        3,
+      )
+      const json = (await res.json()) as { embeddings?: Array<{ values?: number[] }> }
+      const vecs = json.embeddings ?? []
+      // 批量返回数量异常时也降级逐条
+      if (vecs.length !== slice.length) throw new Error("批量返回数量不匹配")
+      for (const e of vecs) out.push(e.values ?? [])
+    } catch (e) {
+      console.log(`[v0] 批量嵌入失败，降级为逐条：${(e as Error).message}`)
+      for (const text of slice) {
+        const v = await geminiEmbedOne(text, "RETRIEVAL_DOCUMENT")
+        out.push(v)
+      }
     }
-    const json = (await res.json()) as { embeddings?: Array<{ values?: number[] }> }
-    for (const e of json.embeddings ?? []) out.push(e.values ?? [])
   }
   return out
 }
