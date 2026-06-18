@@ -1,3 +1,10 @@
+# ⚠️ 放置说明：把本文件移动到 .github/workflows/release.yml 后才会生效。
+# （v0 的 GitHub App 没有 workflows 权限，无法直接创建该路径，故先放在仓库根目录。）
+# 操作：在本地仓库执行
+#   mkdir -p .github/workflows && git mv release-workflow.yml .github/workflows/release.yml
+#   git commit -m "ci: add release workflow" && git push
+# 之后推送形如 v1.0.0 的 tag 即可自动构建并发布 Release。
+
 name: Build & Release
 
 # 推送形如 v1.0.0 的 tag 时触发；也可在 Actions 页手动触发
