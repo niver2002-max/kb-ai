@@ -49,8 +49,8 @@ import {
   type ModelInfo,
   type ModelLiveResult,
 } from "@/lib/kb/api-probe"
-import { runIteration, DEFAULT_AUTO_ITERATE } from "@/lib/kb/auto-iterate"
-import type { KbSource, KbQuestion, KbCategory, KbLibrary, AutoIterateConfig } from "@/lib/kb/types"
+import { startInspection, stopInspection, readInspection } from "@/lib/kb/inspection"
+import type { KbSource, KbQuestion, KbCategory, KbLibrary, InspectionState } from "@/lib/kb/types"
 
 // ===================================================================
 // 多知识库管理
@@ -126,48 +126,22 @@ export async function pingApiModels(
 }
 
 // ===================================================================
-// 后台自迭代（每库开关，默认关闭；开启即愿意持续消耗 token）
+// 高级模型巡检（goal 驱动自迭代；gemini-3.1-pro 决策，服务端常驻、关窗不停）
 // ===================================================================
 
-// 读取某库自迭代配置（缺省返回默认关闭配置）
-export async function getAutoIterate(libId: string): Promise<AutoIterateConfig> {
-  const lib = await getLibrary(libId)
-  return lib?.autoIterate ?? { ...DEFAULT_AUTO_ITERATE }
+// 读取某库巡检状态（前端轮询展示用；会顺带触发服务器重启后的续跑）
+export async function getInspectionState(libId: string): Promise<InspectionState> {
+  return readInspection(libId)
 }
 
-// 更新某库自迭代配置
-export async function setAutoIterate(
-  libId: string,
-  patch: Partial<AutoIterateConfig>,
-): Promise<AutoIterateConfig> {
-  const lib = await getLibrary(libId)
-  const current = lib?.autoIterate ?? { ...DEFAULT_AUTO_ITERATE }
-  const next: AutoIterateConfig = { ...current, ...patch }
-  await patchLibrary(libId, { autoIterate: next })
-  return next
+// 开启巡检（进入巡检态，对话框置灰；引擎在服务端持续跑直到 done 或手动结束）
+export async function startInspectionAction(libId: string): Promise<InspectionState> {
+  return startInspection(libId)
 }
 
-// 记录前台互动时间（用于空闲判定）
-export async function markLibraryActive(libId: string): Promise<void> {
-  await patchLibrary(libId, { lastActiveAt: Date.now() })
-}
-
-// 调度检查：由前端轮询触发。判断各库是否满足"已启用 + 空闲足够久 + 距上次迭代够久"，满足则跑一次迭代。
-// 返回本次实际执行迭代的库结果。
-export async function tickAutoIterate(): Promise<Array<{ libId: string; result: string }>> {
-  const libs = await listLibraries()
-  const now = Date.now()
-  const out: Array<{ libId: string; result: string }> = []
-  for (const lib of libs) {
-    const cfg = lib.autoIterate
-    if (!cfg?.enabled || cfg.running) continue
-    const idleOk = now - (lib.lastActiveAt ?? 0) >= cfg.idleMinutes * 60_000
-    const intervalOk = now - (cfg.lastRunAt ?? 0) >= cfg.intervalMinutes * 60_000
-    if (!idleOk || !intervalOk) continue
-    const result = await runIteration(lib.id)
-    if (result) out.push({ libId: lib.id, result })
-  }
-  return out
+// 手动结束巡检（下一轮边界处停止，随后恢复对话模式）
+export async function stopInspectionAction(libId: string): Promise<InspectionState> {
+  return stopInspection(libId)
 }
 
 // ===================================================================

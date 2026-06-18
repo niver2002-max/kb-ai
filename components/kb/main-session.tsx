@@ -5,7 +5,7 @@ import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Badge } from "@/components/ui/badge"
 import { Markdown } from "@/components/kb/markdown"
-import { SendHorizontal, Sparkles, X, AtSign, FileText } from "lucide-react"
+import { SendHorizontal, Sparkles, X, AtSign, FileText, Square } from "lucide-react"
 import type { KbMessage } from "@/lib/kb/types"
 
 export interface ChatScope {
@@ -28,12 +28,18 @@ export function MainSession({
   chunkCount,
   scope,
   onClearScope,
+  inspecting = false,
+  onBusyChange,
 }: {
   libId: string
   initialMessages: KbMessage[]
   chunkCount: number
   scope: ChatScope | null
   onClearScope: () => void
+  // 巡检进行中：整个对话框置灰、禁用收发
+  inspecting?: boolean
+  // 上报对话是否正在生成（用于禁用「开启巡检」）
+  onBusyChange?: (busy: boolean) => void
 }) {
   const [input, setInput] = useState("")
   const [messages, setMessages] = useState<UiMessage[]>(
@@ -49,6 +55,8 @@ export function MainSession({
   )
   const [busy, setBusy] = useState(false)
   const scrollRef = useRef<HTMLDivElement>(null)
+  // 用于「停止」按钮中断当前生成
+  const abortRef = useRef<AbortController | null>(null)
 
   function scrollToBottom() {
     requestAnimationFrame(() => {
@@ -61,10 +69,19 @@ export function MainSession({
     scrollToBottom()
   }, [])
 
+  useEffect(() => {
+    onBusyChange?.(busy)
+  }, [busy, onBusyChange])
+
+  // 停止当前生成：中断请求，已生成的部分内容保留
+  function stop() {
+    abortRef.current?.abort()
+  }
+
   async function submit(e: React.FormEvent) {
     e.preventDefault()
     const text = input.trim()
-    if (!text || busy) return
+    if (!text || busy || inspecting) return
 
     const userMsg: UiMessage = {
       id: crypto.randomUUID(),
@@ -82,11 +99,15 @@ export function MainSession({
     setBusy(true)
     scrollToBottom()
 
+    const controller = new AbortController()
+    abortRef.current = controller
+
     try {
       const res = await fetch("/api/chat", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ libId, message: text, scope }),
+        signal: controller.signal,
       })
       if (!res.ok || !res.body) {
         throw new Error(await res.text().catch(() => "请求失败"))
@@ -117,13 +138,25 @@ export function MainSession({
         prev.map((m) => (m.id === assistantId ? { ...m, citations } : m)),
       )
     } catch (err) {
-      const msg = err instanceof Error ? err.message : "出错了"
-      setMessages((prev) =>
-        prev.map((m) =>
-          m.id === assistantId ? { ...m, content: `⚠️ ${msg}` } : m,
-        ),
-      )
+      // 用户主动停止：保留已生成内容，不显示报错
+      if (err instanceof DOMException && err.name === "AbortError") {
+        setMessages((prev) =>
+          prev.map((m) =>
+            m.id === assistantId && !m.content
+              ? { ...m, content: "（已停止）" }
+              : m,
+          ),
+        )
+      } else {
+        const msg = err instanceof Error ? err.message : "出错了"
+        setMessages((prev) =>
+          prev.map((m) =>
+            m.id === assistantId ? { ...m, content: `⚠️ ${msg}` } : m,
+          ),
+        )
+      }
     } finally {
+      abortRef.current = null
       setBusy(false)
       scrollToBottom()
     }
@@ -131,7 +164,13 @@ export function MainSession({
 
   return (
     <div className="flex h-full flex-col">
-      <div ref={scrollRef} className="flex-1 overflow-y-auto px-1 py-4">
+      <div
+        ref={scrollRef}
+        className={
+          "flex-1 overflow-y-auto px-1 py-4 transition-opacity " +
+          (inspecting ? "pointer-events-none opacity-50" : "")
+        }
+      >
         {messages.length === 0 ? (
           <div className="flex h-full flex-col items-center justify-center gap-3 text-center text-muted-foreground">
             <Sparkles className="size-8" />
@@ -221,14 +260,28 @@ export function MainSession({
           <Input
             value={input}
             onChange={(e) => setInput(e.target.value)}
-            placeholder={scope ? `在「${scope.label}」范围内提问…` : "向知识库提问…"}
-            disabled={busy}
+            placeholder={
+              inspecting
+                ? "巡检进行中，对话已暂停…"
+                : scope
+                  ? `在「${scope.label}」范围内提问…`
+                  : "向知识库提问…"
+            }
+            // 生成中输入框仍可编辑（只是不能发送）；仅巡检时整体禁用
+            disabled={inspecting}
             aria-label="提问输入框"
           />
-          <Button type="submit" disabled={busy || !input.trim()} size="icon">
-            <SendHorizontal className="size-4" />
-            <span className="sr-only">发送</span>
-          </Button>
+          {busy ? (
+            <Button type="button" onClick={stop} size="icon" variant="secondary" aria-label="停止生成">
+              <Square className="size-3.5 fill-current" />
+              <span className="sr-only">停止</span>
+            </Button>
+          ) : (
+            <Button type="submit" disabled={inspecting || !input.trim()} size="icon">
+              <SendHorizontal className="size-4" />
+              <span className="sr-only">发送</span>
+            </Button>
+          )}
         </form>
       </div>
     </div>

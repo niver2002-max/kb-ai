@@ -66,6 +66,8 @@ interface GenPart {
 interface GenOpts {
   system?: string
   thinking?: ThinkingLevel
+  // 单次调用临时切换模型（如巡检走 gemini-3.1-pro，对话走 gemini-3.5-flash）。不传则用设置里的对话模型。
+  model?: string
   // 结构化输出：传入 Gemini OpenAPI 风格 schema（type 用大写枚举）
   responseSchema?: Record<string, unknown>
   // Gemini 原生工具，例如 [{ url_context: {} }]（抓网页）、[{ google_search: {} }]（联网检索）
@@ -94,10 +96,11 @@ function buildBody(
   return body
 }
 
-async function callGenerate(body: Record<string, unknown>): Promise<string> {
+async function callGenerate(body: Record<string, unknown>, model?: string): Promise<string> {
+  const useModel = model || MODEL()
   // 带指数退避重试：第三方中转常出现瞬时 503/过载（system_cpu_overloaded），重试可显著提升成功率。
   const res = await fetchWithRetry(
-    `${BASE_URL()}/models/${MODEL()}:generateContent`,
+    `${BASE_URL()}/models/${useModel}:generateContent`,
     {
       method: "POST",
       headers: {
@@ -113,7 +116,7 @@ async function callGenerate(body: Record<string, unknown>): Promise<string> {
   const looksLikeHtml = text.trimStart().startsWith("<")
   if (looksLikeHtml) {
     throw new Error(
-      `端点返回了 HTML 而非 JSON，说明端点地址不对（当前实际请求：${BASE_URL()}/models/${MODEL()}）。` +
+      `端点返回了 HTML 而非 JSON，说明端点地址不对（当前实际请求：${BASE_URL()}/models/${useModel}）。` +
         `请确认中转地址正确，通常应形如 https://域名/v1beta。返回片段：${text.slice(0, 120)}`,
     )
   }
@@ -136,13 +139,13 @@ async function callGenerate(body: Record<string, unknown>): Promise<string> {
 // 纯文本生成
 export async function geminiText(prompt: string, opts: GenOpts = {}): Promise<string> {
   const body = buildBody([{ role: "user", parts: [{ text: prompt }] }], opts)
-  return callGenerate(body)
+  return callGenerate(body, opts.model)
 }
 
 // 多模态生成（图片 + 文本），用于扫描件/原理图/图片解析
 export async function geminiParts(parts: GenPart[], opts: GenOpts = {}): Promise<string> {
   const body = buildBody([{ role: "user", parts }], opts)
-  return callGenerate(body)
+  return callGenerate(body, opts.model)
 }
 
 // 原生 PDF 文档理解：把整份 PDF 以 application/pdf inlineData 直接发给模型。
@@ -166,7 +169,7 @@ export async function geminiPdf(
     ],
     { thinking: "adaptive", ...opts },
   )
-  return callGenerate(body)
+  return callGenerate(body, opts.model)
 }
 
 // 多轮对话（非流式）——直接走 generateContent，对第三方中转兼容性最好。
@@ -176,7 +179,7 @@ export async function geminiContents(
   opts: GenOpts = {},
 ): Promise<string> {
   const body = buildBody(contents, opts)
-  return callGenerate(body)
+  return callGenerate(body, opts.model)
 }
 
 // 原生网页理解：用 Gemini 的 url_context 工具，让模型自己抓取并读懂网页内容
@@ -190,7 +193,7 @@ export async function geminiUrlContext(
     [{ role: "user", parts: [{ text: `${instruction}\n\n网址：${url}` }] }],
     { thinking: "adaptive", ...opts, tools: [{ url_context: {} }] },
   )
-  return callGenerate(body)
+  return callGenerate(body, opts.model)
 }
 
 // 原生联网检索：用 Gemini 的 google_search 工具做实时检索（grounding），
@@ -203,12 +206,12 @@ export async function geminiSearch(
     [{ role: "user", parts: [{ text: query }] }],
     { thinking: "adaptive", ...opts, tools: [{ google_search: {} }] },
   )
-  return callGenerate(body)
+  return callGenerate(body, opts.model)
 }
 
 // 从可能含代码围栏/多余文字的文本中提取出 JSON 并解析。
 // 第三方中转对 responseSchema 的支持参差不齐，返回的内容常被包在 ```json``` 里
-// 或前后带说明文字，因此不能直接 JSON.parse。
+// 或前后带说明文字，因此���能直接 JSON.parse。
 function extractJson<T>(raw: string): T {
   const text = raw.trim()
   // 1) 直接尝试

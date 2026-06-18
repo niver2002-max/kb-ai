@@ -6,7 +6,8 @@ import path from "node:path"
 export interface ApiSettings {
   baseUrl: string // 第三方 Gemini 原生兼容端点（可只填域名，自动补 /v1beta）
   apiKey: string // API Key（x-goog-api-key）
-  model: string // 对话/生成模型
+  model: string // 对话/生成模型（活动对话固定用它，默认 gemini-3.5-flash）
+  inspectModel: string // 巡检模型（高级模型，默认 gemini-3.1-pro）
   embedModel: string // 向量模型
   temperature: number // 采样温度
   stream: boolean // 是否启用 SSE 流式
@@ -23,6 +24,7 @@ function envDefaults(): ApiSettings {
     baseUrl: process.env.GEMINI_BASE_URL || DEFAULT_BASE,
     apiKey: process.env.GEMINI_API_KEY || "",
     model: process.env.GEMINI_MODEL || "gemini-3.5-flash",
+    inspectModel: process.env.GEMINI_INSPECT_MODEL || "gemini-3.1-pro",
     embedModel: process.env.GEMINI_EMBED_MODEL || "gemini-embedding-001",
     temperature: Number.isFinite(t) ? t : 0,
     stream: (process.env.GEMINI_STREAM ?? "true").toLowerCase() !== "false",
@@ -53,6 +55,7 @@ export function getSettings(): ApiSettings {
     baseUrl: s.baseUrl?.trim() || defaults.baseUrl,
     apiKey: s.apiKey?.trim() || defaults.apiKey,
     model: s.model?.trim() || defaults.model,
+    inspectModel: s.inspectModel?.trim() || defaults.inspectModel,
     embedModel: s.embedModel?.trim() || defaults.embedModel,
     temperature: Number.isFinite(s.temperature) ? s.temperature : defaults.temperature,
     stream: typeof s.stream === "boolean" ? s.stream : defaults.stream,

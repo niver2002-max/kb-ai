@@ -80,34 +80,6 @@ export function KnowledgeBase({ initialLibraries }: { initialLibraries: KbLibrar
     scrollerRef.current?.scrollBy({ left: dir * 320, behavior: "smooth" })
   }
 
-  // 后台自迭代调度：每分钟询问后端是否有库满足"已启用+空闲+到点"，满足则跑一次迭代。
-  // 仅依赖各库自身的开关（默认关闭），关闭时后端直接跳过、不消耗 token。
-  useEffect(() => {
-    let stop = false
-    async function loop() {
-      if (stop) return
-      try {
-        const runs = await tickAutoIterate()
-        for (const r of runs) {
-          const lib = libraries.find((l) => l.id === r.libId)
-          toast.success(`自迭代「${lib?.title ?? r.libId}」：${r.result}`)
-        }
-        if (runs.length > 0) {
-          // 迭代可能改了 updatedAt，刷新列表顺序
-          const libs = await getLibraries()
-          if (!stop) setLibraries(libs)
-        }
-      } catch {
-        // 静默：调度失败不打扰用户
-      }
-    }
-    const timer = setInterval(loop, 60_000)
-    return () => {
-      stop = true
-      clearInterval(timer)
-    }
-  }, [libraries])
-
   // 进入某个知识库工作区：拉取 state + 会话（resume）
   function enterLibrary(library: KbLibrary) {
     setEnteringId(library.id)

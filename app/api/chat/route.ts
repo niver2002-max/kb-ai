@@ -6,6 +6,7 @@ import {
   buildContextMessages,
   retrieveContext,
 } from "@/lib/kb/session"
+import { getInspection } from "@/lib/kb/inspection"
 
 // Node 运行时（需要文件系统访问），不可用 edge
 export const runtime = "nodejs"
@@ -22,6 +23,12 @@ export async function POST(req: Request) {
 
   if (!libId || !message) {
     return new Response("缺少 libId 或 message", { status: 400 })
+  }
+
+  // 0) 巡检态拦截：巡检进行中（且未完成）时对话框应已置灰，这里再做服务端兜底。
+  const insp = await getInspection(libId)
+  if (insp.active && !insp.done) {
+    return new Response("知识库正在巡检中，请先结束巡检再对话。", { status: 409 })
   }
 
   // 1) 持久化用户消息
