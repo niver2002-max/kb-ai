@@ -58,20 +58,20 @@ jobs:
           if [ -d public ]; then cp -r public "$DIST/public"; fi
 
           # Windows 一键启动脚本（双击运行）。默认端口 3000，可用 set PORT=xxxx 覆盖。
-          # 关键：切到脚本目录、检测 Node、出错暂停，避免“闪一下就消失”看不到原因。
+          # 注意：脚本内容必须全为 ASCII 英文。cmd.exe 按本地代码页逐字节解析 .bat，
+          # 中文字符会被当成命令导致报错（如 'tart' is not recognized），因此一律用英文。
           cat > "$DIST/start.bat" << 'EOF'
           @echo off
-          chcp 65001 >nul
           setlocal
-          rem 切换到脚本所在目录，确保能找到 server.js（双击运行时工作目录可能不对）
+          rem Switch to the script's own folder so server.js can be found on double-click.
           cd /d "%~dp0"
 
-          rem 检测 Node 是否已安装并在 PATH 中
+          rem Check Node.js is installed and on PATH.
           where node >nul 2>nul
           if errorlevel 1 (
             echo.
-            echo [错误] 未检测到 Node.js。
-            echo 请先到 https://nodejs.org 下载安装 Node.js 20 或更高版本，安装后重新运行本程序。
+            echo [ERROR] Node.js was not found.
+            echo Please install Node.js 20+ from https://nodejs.org and run this again.
             echo.
             pause
             exit /b 1
@@ -80,29 +80,29 @@ jobs:
           if "%PORT%"=="" set PORT=3000
           set HOSTNAME=127.0.0.1
 
-          rem 确认 server.js 存在
+          rem Make sure server.js exists.
           if not exist "server.js" (
             echo.
-            echo [错误] 未找到 server.js，请确认已将压缩包完整解压后再运行本脚本。
-            echo 当前目录：%CD%
+            echo [ERROR] server.js not found. Please fully extract the zip, then run this script.
+            echo Current folder: %CD%
             echo.
             pause
             exit /b 1
           )
 
-          echo 正在启动 KB-AI，地址： http://127.0.0.1:%PORT%
-          echo 启动后浏览器会自动打开；如未打开，请手动访问上面的地址。
-          echo 关闭本窗口即可停止服务。
+          echo Starting KB-AI at http://127.0.0.1:%PORT%
+          echo The browser will open automatically. If not, open the URL above.
+          echo Close this window to stop the server.
           echo.
 
-          rem 延迟几秒再打开浏览器，等服务器就绪
+          rem Open the browser after a short delay so the server is ready.
           start "" /b cmd /c "timeout /t 3 >nul & start "" http://127.0.0.1:%PORT%"
 
           node server.js
           set EXITCODE=%errorlevel%
           if not "%EXITCODE%"=="0" (
             echo.
-            echo [错误] 服务异常退出，错误码 %EXITCODE%。请将以上信息截图反馈。
+            echo [ERROR] Server exited with code %EXITCODE%. Please screenshot the messages above.
             echo.
             pause
           )
