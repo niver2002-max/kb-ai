@@ -27,12 +27,91 @@ import {
   patchCrawlLinks,
   readCrawl,
 } from "@/lib/kb/store"
-import type { KbSource, KbQuestion, KbCategory } from "@/lib/kb/types"
+import {
+  listLibraries,
+  getLibrary,
+  createLibrary,
+  patchLibrary,
+  deleteLibrary,
+  initLibraryDir,
+} from "@/lib/kb/library"
+import {
+  readSession,
+  appendMessage,
+  clearSession,
+} from "@/lib/kb/session"
+import type { KbSource, KbQuestion, KbCategory, KbLibrary } from "@/lib/kb/types"
+
+// ===================================================================
+// 多知识库管理
+// ===================================================================
+
+export async function getLibraries(): Promise<KbLibrary[]> {
+  return listLibraries()
+}
+
+export async function getLibraryById(id: string): Promise<KbLibrary | null> {
+  return getLibrary(id)
+}
+
+// 新建知识库：登记元信息 → 初始化目录分层 + git
+export async function createKbLibrary(input: {
+  title: string
+  audience: string
+  rootDir: string
+  sourceMode: KbLibrary["sourceMode"]
+}) {
+  const lib = await createLibrary(input)
+  try {
+    const { hasGit } = await initLibraryDir(lib)
+    const updated = await patchLibrary(lib.id, { hasGit, initialized: true })
+    // 同步根目录到该库索引
+    await setRootDir(lib.id, lib.rootDir)
+    return updated ?? lib
+  } catch (err) {
+    await patchLibrary(lib.id, {
+      initialized: false,
+    })
+    throw err
+  }
+}
+
+export async function deleteKbLibrary(id: string) {
+  await deleteLibrary(id)
+  return listLibraries()
+}
+
+// ===================================================================
+// 会话持久化（resume / 读取 / 清空）
+// ===================================================================
+
+export async function getSession(libId: string) {
+  return readSession(libId)
+}
+
+export async function clearKbSession(libId: string) {
+  await clearSession(libId)
+  return readSession(libId)
+}
+
+// 写入一条用户消息（前端发起对话前调用，便于乐观更新与持久化解耦时使用）
+export async function appendUserMessage(
+  libId: string,
+  content: string,
+  scope?: { type: "category" | "source"; id: string; label: string } | null,
+) {
+  return appendMessage(libId, { role: "user", content, scope: scope ?? null })
+}
+
+// ===================================================================
+// 知识库状态
+// ===================================================================
 
 // 返回给前端的精简状态（不含 embedding，避免传输过大）
-export async function getKbState() {
-  const index = await readIndex()
+export async function getKbState(libId: string) {
+  const index = await readIndex(libId)
   return {
+    libId,
     rootDir: index.rootDir,
     updatedAt: index.updatedAt,
     sources: index.sources,
@@ -42,45 +121,44 @@ export async function getKbState() {
 }
 
 // 1. 扫描本地目录
-export async function scanDir(rootDir: string) {
+export async function scanDir(libId: string, rootDir: string) {
   if (!rootDir?.trim()) throw new Error("请输入目录路径")
   const result = await scanDirectory(rootDir.trim())
-  await setRootDir(result.rootDir)
-  await upsertSources(result.sources)
-  return getKbState()
+  await setRootDir(libId, result.rootDir)
+  await upsertSources(libId, result.sources)
+  return getKbState(libId)
 }
 
 // 添加网页来源
-export async function addWebSources(urlsText: string) {
+export async function addWebSources(libId: string, urlsText: string) {
   const urls = urlsText
     .split(/[\n,;]+/)
     .map((u) => u.trim())
     .filter((u) => /^https?:\/\//i.test(u))
   if (urls.length === 0) throw new Error("未发现有效的 http(s) 链接")
   const sources = urls.map(makeWebSource)
-  await upsertSources(sources)
-  return getKbState()
+  await upsertSources(libId, sources)
+  return getKbState(libId)
 }
 
-export async function removeSource(id: string) {
-  await removeSourceFromStore(id)
-  return getKbState()
+export async function removeSource(libId: string, id: string) {
+  await removeSourceFromStore(libId, id)
+  return getKbState(libId)
 }
 
-export async function resetKb() {
-  await resetIndex()
-  return getKbState()
+export async function resetKb(libId: string) {
+  await resetIndex(libId)
+  return getKbState(libId)
 }
 
 // 2. LLM 初筛：根据 prompt 给每个来源打相关性分并给出一句话说明
-export async function screenSources(userPrompt: string) {
-  const index = await readIndex()
+export async function screenSources(libId: string, userPrompt: string) {
+  const index = await readIndex(libId)
   const candidates = index.sources.filter(
     (s) => s.category !== "binary" && s.status !== "embedded",
   )
-  if (candidates.length === 0) return getKbState()
+  if (candidates.length === 0) return getKbState(libId)
 
-  // 分批交给模型，多批之间并发执行（彼此独立），缩短大批量文件的初筛耗时。
   const batchSize = 40
   const batches: KbSource[][] = []
   for (let i = 0; i < candidates.length; i += batchSize) {
@@ -126,21 +204,24 @@ export async function screenSources(userPrompt: string) {
     for (const item of output.items) {
       const src = batch[item.index]
       if (!src) continue
-      await updateSource(src.id, {
+      await updateSource(libId, src.id, {
         relevance: item.relevance,
         note: item.note,
       })
     }
   })
-  return getKbState()
+  return getKbState(libId)
 }
 
 // 3. 构建知识库：解析 + 切块 + 嵌入。可选只处理相关性达标的来源。
-export async function buildKb(opts?: {
-  minRelevance?: number
-  includeIds?: string[]
-}) {
-  const index = await readIndex()
+export async function buildKb(
+  libId: string,
+  opts?: {
+    minRelevance?: number
+    includeIds?: string[]
+  },
+) {
+  const index = await readIndex(libId)
   let targets = index.sources.filter((s) => s.category !== "binary")
 
   if (opts?.includeIds && opts.includeIds.length > 0) {
@@ -154,15 +235,13 @@ export async function buildKb(opts?: {
 
   let processed = 0
   let failed = 0
-  // 受控并发处理多个来源：解析+切块+嵌入相互独立，可并行以大幅缩短整体耗时。
-  // 并发度取自 KB_BUILD_CONCURRENCY（默认 4），避免一次性打爆端点。
   const concurrency = Number(process.env.KB_BUILD_CONCURRENCY ?? 4) || 4
   await mapLimit(targets, concurrency, async (source) => {
     try {
-      await updateSource(source.id, { status: "parsing" })
+      await updateSource(libId, source.id, { status: "parsing" })
       const segments = await parseOne(source)
       if (segments.length === 0) {
-        await updateSource(source.id, {
+        await updateSource(libId, source.id, {
           status: "skipped",
           note: source.note ?? "无可提取文本",
         })
@@ -170,8 +249,8 @@ export async function buildKb(opts?: {
       }
       const chunks = chunkSegments(segments)
       const embedded = await embedSegments(source.id, chunks)
-      await replaceChunks(source.id, embedded)
-      await updateSource(source.id, {
+      await replaceChunks(libId, source.id, embedded)
+      await updateSource(libId, source.id, {
         status: "embedded",
         charCount: segments.reduce((n, s) => n + s.text.length, 0),
         chunkCount: embedded.length,
@@ -180,14 +259,14 @@ export async function buildKb(opts?: {
       processed++
     } catch (err) {
       failed++
-      await updateSource(source.id, {
+      await updateSource(libId, source.id, {
         status: "error",
         error: err instanceof Error ? err.message : String(err),
       })
     }
   })
 
-  const state = await getKbState()
+  const state = await getKbState(libId)
   return { ...state, processed, failed }
 }
 
@@ -198,7 +277,6 @@ async function parseOne(source: KbSource) {
   }
   const result = await parseFile(source)
   if (result.needsVision) {
-    // 图片型/扫描件走视觉模型
     return visionExtract(source)
   }
   return result.segments
@@ -212,10 +290,6 @@ function formatSize(bytes: number): string {
 
 // ===================================================================
 // 多阶段自适应构建流程（human-in-the-loop）
-//   idle → [startBuild] → scanned(第1批问题)
-//        → [submitRound1] → built(二筛+目录+精细化+报告1+第2批问题)
-//        → [submitRound2] → reviewing(报告2，待验收)
-//        → [acceptBuild]  → ready(对话提升模式)
 // ===================================================================
 
 const QUESTIONS_SCHEMA = {
@@ -238,7 +312,6 @@ const QUESTIONS_SCHEMA = {
   required: ["intro", "questions"],
 } as const
 
-// 列出候选来源（带初筛分与说明），供模型决策
 function listCandidates(sources: KbSource[]): string {
   return sources
     .map(
@@ -254,17 +327,16 @@ function listCandidates(sources: KbSource[]): string {
 }
 
 // 阶段一：扫描结果已就绪 → 初筛 + 生成第一批澄清选择题
-export async function startBuild(userPrompt: string) {
+export async function startBuild(libId: string, userPrompt: string) {
   const prompt = (userPrompt || "").trim()
-  await patchWorkflow({ stage: "idle", userPrompt: prompt, busy: "初筛中" })
+  await patchWorkflow(libId, { stage: "idle", userPrompt: prompt, busy: "初筛中" })
 
-  // 先做初筛打分
-  await screenSources(prompt)
+  await screenSources(libId, prompt)
 
-  const index = await readIndex()
+  const index = await readIndex(libId)
   const candidates = index.sources.filter((s) => s.category !== "binary")
   if (candidates.length === 0) {
-    await patchWorkflow({ busy: undefined })
+    await patchWorkflow(libId, { busy: undefined })
     throw new Error("没有可用于构建的来源，请先扫描目录或添加网址")
   }
 
@@ -276,8 +348,8 @@ export async function startBuild(userPrompt: string) {
       `下面是初筛后的候选资料（含类型、相关性、说明）：\n\n${listCandidates(candidates)}\n\n` +
       `请基于这些资料，向用户提出 3-5 道**选择题**来澄清构建偏好，` +
       `例如：聚焦哪些主题/子系统、是否纳入低相关资料、知识库用途（速查/学习/问答）、` +
-      `详略程��、是否需要联网补充背景等。每题给出 2-5 个可选项，合适的设为多选。` +
-      `intro 用一��话概述初筛发现（共多少份、主要类型、初步判断）。用中文。`,
+      `详略程度、是否需要联网补充背景等。每题给出 2-5 个可选项，合适的设为多选。` +
+      `intro 用一句话概述初筛发现（共多少份、主要类型、初步判断）。用中文。`,
     QUESTIONS_SCHEMA,
     { thinking: "adaptive" },
   )
@@ -289,7 +361,7 @@ export async function startBuild(userPrompt: string) {
     multiSelect: !!q.multiSelect,
   }))
 
-  await patchWorkflow({
+  await patchWorkflow(libId, {
     stage: "scanned",
     userPrompt: prompt,
     rounds: [{ round: 1, intro: out.intro, questions }],
@@ -297,7 +369,7 @@ export async function startBuild(userPrompt: string) {
     categories: [],
     busy: undefined,
   })
-  return getKbState()
+  return getKbState(libId)
 }
 
 type AnswerInput = { id: string; answer: string[]; freeText?: string }
@@ -328,24 +400,23 @@ function answersDigest(questions: KbQuestion[]): string {
 }
 
 // 阶段二：提交第一批答案 → 二筛 + 建目录 + 精细化构建 + 报告1 + 第二批问题
-export async function submitRound1(answers: AnswerInput[]) {
-  const wf = await readWorkflow()
+export async function submitRound1(libId: string, answers: AnswerInput[]) {
+  const wf = await readWorkflow(libId)
   const round1 = wf.rounds.find((r) => r.round === 1)
   if (!round1) throw new Error("流程状态异常：缺少第一轮问题")
 
   const answered = applyAnswers(round1.questions, answers)
   const digest = answersDigest(answered)
-  await patchWorkflow({
+  await patchWorkflow(libId, {
     rounds: wf.rounds.map((r) =>
       r.round === 1 ? { ...r, questions: answered, answeredAt: Date.now() } : r,
     ),
     busy: "二筛与目录规划中",
   })
 
-  const index = await readIndex()
+  const index = await readIndex(libId)
   const candidates = index.sources.filter((s) => s.category !== "binary")
 
-  // 二筛决策：决定纳入哪些来源 + 构建分类目录
   const decision = await geminiJson<{
     categories: Array<{ name: string; description: string; indexes: number[] }>
     excluded: number[]
@@ -380,7 +451,6 @@ export async function submitRound1(answers: AnswerInput[]) {
     { thinking: "adaptive" },
   )
 
-  // 落地分类目录（index → sourceId）
   const categories: KbCategory[] = decision.categories.map((c, i) => ({
     id: `cat-${i}`,
     name: c.name,
@@ -391,18 +461,15 @@ export async function submitRound1(answers: AnswerInput[]) {
     decision.excluded.map((n) => candidates[n]?.id).filter(Boolean) as string[],
   )
 
-  // 被排除的标记 skipped
   for (const id of excludedIds) {
-    await updateSource(id, { status: "skipped", note: "二筛排除：与目标关联较弱" })
+    await updateSource(libId, id, { status: "skipped", note: "二筛排除：与目标关联较弱" })
   }
-  await patchWorkflow({ categories, busy: "精细化解析与入库中" })
+  await patchWorkflow(libId, { categories, busy: "精细化解析与入库中" })
 
-  // 精细化构建：仅处理纳入的来源（PDF 原生理解 / 图片视觉 / 网页 url_context 已在 parseOne 内）
   const includeIds = categories.flatMap((c) => c.sourceIds)
-  const buildResult = await buildKb({ includeIds })
+  const buildResult = await buildKb(libId, { includeIds })
 
-  // 报告1 + 第二批问题
-  const built = (await readIndex()).sources.filter((s) => s.status === "embedded")
+  const built = (await readIndex(libId)).sources.filter((s) => s.status === "embedded")
   const builtSummary = built
     .map((s) => `- ${s.name}（${s.chunkCount ?? 0} 块）`)
     .join("\n")
@@ -443,8 +510,8 @@ export async function submitRound1(answers: AnswerInput[]) {
     multiSelect: !!q.multiSelect,
   }))
 
-  const wf2 = await readWorkflow()
-  await patchWorkflow({
+  const wf2 = await readWorkflow(libId)
+  await patchWorkflow(libId, {
     stage: "built",
     reports: [...wf2.reports, { round: 1, markdown: out.report, createdAt: Date.now() }],
     rounds: [
@@ -453,25 +520,25 @@ export async function submitRound1(answers: AnswerInput[]) {
     ],
     busy: undefined,
   })
-  return getKbState()
+  return getKbState(libId)
 }
 
 // 阶段三：提交第二批答案 → 生成第二次（验收）报告
-export async function submitRound2(answers: AnswerInput[]) {
-  const wf = await readWorkflow()
+export async function submitRound2(libId: string, answers: AnswerInput[]) {
+  const wf = await readWorkflow(libId)
   const round2 = wf.rounds.find((r) => r.round === 2)
   if (!round2) throw new Error("流程状态异常：缺少第二轮问题")
 
   const answered = applyAnswers(round2.questions, answers)
   const digest = answersDigest(answered)
-  await patchWorkflow({
+  await patchWorkflow(libId, {
     rounds: wf.rounds.map((r) =>
       r.round === 2 ? { ...r, questions: answered, answeredAt: Date.now() } : r,
     ),
     busy: "生成验收报告中",
   })
 
-  const index = await readIndex()
+  const index = await readIndex(libId)
   const built = index.sources.filter((s) => s.status === "embedded")
   const catSummary = wf.categories
     .map((c) => `### ${c.name}\n${c.description}\n含 ${c.sourceIds.length} 份资料`)
@@ -498,77 +565,68 @@ export async function submitRound2(answers: AnswerInput[]) {
     { thinking: "adaptive" },
   )
 
-  const wf2 = await readWorkflow()
-  await patchWorkflow({
+  const wf2 = await readWorkflow(libId)
+  await patchWorkflow(libId, {
     stage: "reviewing",
     reports: [...wf2.reports, { round: 2, markdown: report2, createdAt: Date.now() }],
     busy: undefined,
   })
-  return getKbState()
+  return getKbState(libId)
 }
 
 // 阶段四：验收通过 → 进入对话提升模式
-export async function acceptBuild() {
-  await patchWorkflow({ stage: "ready", busy: undefined })
-  return getKbState()
+export async function acceptBuild(libId: string) {
+  await patchWorkflow(libId, { stage: "ready", busy: undefined })
+  return getKbState(libId)
 }
 
 // 退回上一阶段 / 重做（不清空已入库数据，仅回退工作流）
-export async function restartWorkflow() {
-  await patchWorkflow({
+export async function restartWorkflow(libId: string) {
+  await patchWorkflow(libId, {
     stage: "idle",
     rounds: [],
     reports: [],
     categories: [],
     busy: undefined,
   })
-  return getKbState()
+  return getKbState(libId)
 }
 
 // ===================================================================
 // 站点智能抓取编排（运行时由 Gemini 分诊，绝不按 URL 写死）
-//   crawlSite     → 分诊 + 遍历枚举 + 按目标选取，产出可勾选链接清单
-//   ingestFetchable → 把勾选的"可在线识别"链接抓取入库
-//   serverDownload  → 把勾选的"开放可下载"文件下到项目 downloads/ 并入库
-//   getDownloadManifest → 导出"需用户端下载"的链接清单（供一键批量下载）
 // ===================================================================
 
-// 返回抓取会话的精简状态
-export async function getCrawlState(crawlId: string) {
-  const site = await readCrawl(crawlId)
-  return site
+export async function getCrawlState(libId: string, crawlId: string) {
+  return readCrawl(libId, crawlId)
 }
 
-// 步骤一：仅分诊（快速返回）。判断站点类型、是否需登录、登录页，立即给用户反馈。
-// 需登录的站点可在此步后先登录，再枚举（登录后才能看到完整清单）。
-export async function classifyOnly(rootUrl: string) {
+// 步骤一：仅分诊（快速返回）。
+export async function classifyOnly(libId: string, rootUrl: string) {
   const url = (rootUrl || "").trim()
   if (!/^https?:\/\//i.test(url)) throw new Error("请输入有效的 http(s) 网址")
   const site = await classifySite(url)
-  await upsertCrawl(site)
+  await upsertCrawl(libId, site)
   return site
 }
 
-// 步骤二：枚举 + 按目标选取（较慢，单独触发，便于显示进度）。
-// maxLinks 控制枚举上限，maxPick 控制最终保留数。
+// 步骤二：枚举 + 按目标选取（较慢，单独触发）。
 export async function enumerateAndSelect(
+  libId: string,
   crawlId: string,
   userPrompt: string,
   opts?: { maxLinks?: number; maxPick?: number },
 ) {
-  const site = await readCrawl(crawlId)
+  const site = await readCrawl(libId, crawlId)
   if (!site) throw new Error("抓取会话不存在")
 
-  await patchCrawl(site.id, { busy: "遍历站点中" })
+  await patchCrawl(libId, site.id, { busy: "遍历站点中" })
   const enumerated = await enumerateSite(site, {
     maxLinks: opts?.maxLinks ?? 2000,
     maxDepth: site.siteKind === "wiki" ? 0 : 2,
   })
 
-  await patchCrawl(site.id, { busy: "AI 按目标筛选链接中" })
+  await patchCrawl(libId, site.id, { busy: "AI 按目标筛选链接中" })
   const picked = await selectLinks(site, enumerated, userPrompt, opts?.maxPick ?? 60)
-  // 默认勾选：可在线识别、开放可服务端下载、以及需手动下载（受登录保护）的项都预勾选，
-  // 受保护文件走"浏览器登录 + 一键批量下载到项目目录"。
   const links = picked.map((l) => ({
     ...l,
     picked:
@@ -577,23 +635,24 @@ export async function enumerateAndSelect(
       l.action === "manual_download",
   }))
 
-  const updated = await patchCrawl(site.id, { links, busy: undefined })
+  const updated = await patchCrawl(libId, site.id, { links, busy: undefined })
   return updated
 }
 
 // 一键抓取（兼容旧调用）：分诊 → 枚举 → 选取。
 export async function crawlSite(
+  libId: string,
   rootUrl: string,
   userPrompt: string,
   opts?: { maxLinks?: number; maxPick?: number },
 ) {
-  const site = await classifyOnly(rootUrl)
-  return enumerateAndSelect(site.id, userPrompt, opts)
+  const site = await classifyOnly(libId, rootUrl)
+  return enumerateAndSelect(libId, site.id, userPrompt, opts)
 }
 
 // 把勾选的可在线识别链接（action=fetch）抓取并入库为知识库来源。
-export async function ingestFetchable(crawlId: string) {
-  const site = await readCrawl(crawlId)
+export async function ingestFetchable(libId: string, crawlId: string) {
+  const site = await readCrawl(libId, crawlId)
   if (!site) throw new Error("抓取会话不存在")
   const targets = site.links.filter(
     (l) => l.picked && l.action === "fetch" && !l.ingested,
@@ -607,7 +666,6 @@ export async function ingestFetchable(crawlId: string) {
     try {
       const md = await fetchLinkContent(link.url)
       if (!md) throw new Error("正文为空")
-      // 组装成一个 web 来源并入库
       const source: KbSource = {
         id: `web-${link.id}`,
         kind: "web",
@@ -619,32 +677,32 @@ export async function ingestFetchable(crawlId: string) {
         status: "parsing",
         updatedAt: Date.now(),
       }
-      await upsertSources([source])
+      await upsertSources(libId, [source])
       const chunks = chunkSegments([{ text: md, loc: link.url }])
       const embedded = await embedSegments(source.id, chunks)
-      await replaceChunks(source.id, embedded)
-      await updateSource(source.id, {
+      await replaceChunks(libId, source.id, embedded)
+      await updateSource(libId, source.id, {
         status: "embedded",
         charCount: md.length,
         chunkCount: embedded.length,
       })
-      await patchCrawlLinks(crawlId, [{ id: link.id, ingested: true }])
+      await patchCrawlLinks(libId, crawlId, [{ id: link.id, ingested: true }])
       ingested++
     } catch (err) {
-      await patchCrawlLinks(crawlId, [
+      await patchCrawlLinks(libId, crawlId, [
         { id: link.id, note: `抓取失败：${err instanceof Error ? err.message : String(err)}` },
       ])
       failed++
     }
   })
 
-  const updatedSite = await readCrawl(crawlId)
+  const updatedSite = await readCrawl(libId, crawlId)
   return { ingested, failed, site: updatedSite }
 }
 
 // 把勾选的开放可下载文件（action=server_download）下载到项目 downloads/，并尝试解析入库。
-export async function serverDownload(crawlId: string) {
-  const site = await readCrawl(crawlId)
+export async function serverDownload(libId: string, crawlId: string) {
+  const site = await readCrawl(libId, crawlId)
   if (!site) throw new Error("抓取会话不存在")
   const targets = site.links.filter(
     (l) => l.picked && l.action === "server_download" && !l.downloaded,
@@ -664,24 +722,23 @@ export async function serverDownload(crawlId: string) {
   await mapLimit(targets, 3, async (link) => {
     try {
       await downloadToProject(link.url, host)
-      await patchCrawlLinks(crawlId, [{ id: link.id, downloaded: true }])
+      await patchCrawlLinks(libId, crawlId, [{ id: link.id, downloaded: true }])
       downloaded++
     } catch (err) {
-      await patchCrawlLinks(crawlId, [
+      await patchCrawlLinks(libId, crawlId, [
         { id: link.id, note: `下载失败：${err instanceof Error ? err.message : String(err)}` },
       ])
       failed++
     }
   })
 
-  const updatedSite = await readCrawl(crawlId)
+  const updatedSite = await readCrawl(libId, crawlId)
   return { downloaded, failed, site: updatedSite }
 }
 
 // 导出"需用户在浏览器端下载"的链接清单（action=manual_download 且已勾选）。
-// 供前端用 File System Access API 一键批量下载到项目目录。
-export async function getDownloadManifest(crawlId: string) {
-  const site = await readCrawl(crawlId)
+export async function getDownloadManifest(libId: string, crawlId: string) {
+  const site = await readCrawl(libId, crawlId)
   if (!site) return { rootUrl: "", host: "", items: [] as Array<{ url: string; name: string; note?: string }> }
   const host = (() => {
     try {
@@ -705,15 +762,16 @@ export async function getDownloadManifest(crawlId: string) {
 
 // 更新链接勾选状态（前端勾选/取消）
 export async function setCrawlLinkPicked(
+  libId: string,
   crawlId: string,
   linkId: string,
   picked: boolean,
 ) {
-  return patchCrawlLinks(crawlId, [{ id: linkId, picked }])
+  return patchCrawlLinks(libId, crawlId, [{ id: linkId, picked }])
 }
 
 // 触发一次目录重扫（用户把手动下载的文件放进 downloads/ 后调用）
-export async function rescanDownloads() {
+export async function rescanDownloads(libId: string) {
   const { DOWNLOADS_DIR } = await import("@/lib/kb/crawl")
   const fs = await import("node:fs/promises")
   try {
@@ -722,6 +780,6 @@ export async function rescanDownloads() {
     // 忽略
   }
   const result = await scanDirectory(DOWNLOADS_DIR)
-  await upsertSources(result.sources)
-  return getKbState()
+  await upsertSources(libId, result.sources)
+  return getKbState(libId)
 }

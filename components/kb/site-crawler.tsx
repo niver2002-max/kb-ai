@@ -54,9 +54,11 @@ const ACTION_META: Record<LinkAction, { label: string; cls: string }> = {
 }
 
 export function SiteCrawler({
+  libId,
   state,
   setState,
 }: {
+  libId: string
   state: KbState
   setState: (s: KbState) => void
 }) {
@@ -84,11 +86,11 @@ export function SiteCrawler({
     setBusyLabel("分诊站点类型中…")
     startTransition(async () => {
       try {
-        const classified = await classifyOnly(u)
+        const classified = await classifyOnly(libId, u)
         setSite(classified)
         toast.success(`分诊完成：${SITE_KIND_LABEL[classified.siteKind]}${classified.requiresLogin ? "（需登录）" : ""}`)
         setBusyLabel("遍历站点并按目标筛选中…")
-        const result = await enumerateAndSelect(classified.id, prompt.trim())
+        const result = await enumerateAndSelect(libId, classified.id, prompt.trim())
         if (result) setSite(result)
         toast.success(`发现 ${result?.links.length ?? 0} 条相关链接`)
       } catch (e) {
@@ -105,7 +107,7 @@ export function SiteCrawler({
     setBusyLabel("遍历站点并按目标筛选中…")
     startTransition(async () => {
       try {
-        const result = await enumerateAndSelect(site.id, prompt.trim())
+        const result = await enumerateAndSelect(libId, site.id, prompt.trim())
         if (result) setSite(result)
         toast.success(`发现 ${result?.links.length ?? 0} 条相关链接`)
       } catch (e) {
@@ -125,7 +127,7 @@ export function SiteCrawler({
       links: site.links.map((l) => (l.id === link.id ? { ...l, picked: next } : l)),
     })
     startTransition(async () => {
-      await setCrawlLinkPicked(site.id, link.id, next)
+      await setCrawlLinkPicked(libId, site.id, link.id, next)
     })
   }
 
@@ -134,7 +136,7 @@ export function SiteCrawler({
     setBusyLabel("在线抓取识别并入库中…")
     startTransition(async () => {
       try {
-        const r = await ingestFetchable(site.id)
+        const r = await ingestFetchable(libId, site.id)
         if (r.site) setSite(r.site)
         toast.success(`已入库 ${r.ingested} 个页面${r.failed ? `，失败 ${r.failed}` : ""}`)
       } catch (e) {
@@ -150,10 +152,10 @@ export function SiteCrawler({
     setBusyLabel("服务端下载到项目目录中…")
     startTransition(async () => {
       try {
-        const r = await serverDownload(site.id)
+        const r = await serverDownload(libId, site.id)
         if (r.site) setSite(r.site)
         // 下载后重扫 downloads/ 并入库
-        const s = await rescanDownloads()
+        const s = await rescanDownloads(libId)
         setState(s)
         toast.success(`已下载 ${r.downloaded} 个文件到 downloads/${r.failed ? `，失败 ${r.failed}` : ""}`)
       } catch (e) {
@@ -168,7 +170,7 @@ export function SiteCrawler({
   // 浏览器用当前登录态逐个抓取并写入（同域 cookie 自动带上）。
   async function runBatchManualDownload() {
     if (!site) return
-    const { items, host } = await getDownloadManifest(site.id)
+    const { items, host } = await getDownloadManifest(libId, site.id)
     if (items.length === 0) {
       toast.error("没有勾选的需手动下载文件")
       return
@@ -201,7 +203,7 @@ export function SiteCrawler({
         }
         toast.success(`已写入 ${ok} 个文件到 downloads/${host}${fail ? `，${fail} 个失败（可能被 CORS 拦截，请用下方链接手动下载）` : ""}`)
         if (ok > 0) {
-          const s = await rescanDownloads()
+          const s = await rescanDownloads(libId)
           setState(s)
         }
         return
@@ -228,7 +230,7 @@ export function SiteCrawler({
     setBusyLabel("重新扫描 downloads/ 中…")
     startTransition(async () => {
       try {
-        const s = await rescanDownloads()
+        const s = await rescanDownloads(libId)
         setState(s)
         toast.success("已重新扫描 downloads/ 目录并更新来源")
       } catch (e) {
@@ -270,7 +272,7 @@ export function SiteCrawler({
             <Label htmlFor="crawl-prompt">抓取目标 / 提示词</Label>
             <Textarea
               id="crawl-prompt"
-              placeholder="例��：收集 Tang FPGA 的数据手册与引脚封装资料"
+              placeholder="例��：收�� Tang FPGA 的数据手册与引脚封装资料"
               value={prompt}
               onChange={(e) => setPrompt(e.target.value)}
               disabled={pending}

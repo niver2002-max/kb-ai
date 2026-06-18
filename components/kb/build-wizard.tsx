@@ -46,10 +46,12 @@ const STAGES: { key: WorkflowStage; label: string }[] = [
 ]
 
 export function BuildWizard({
+  libId,
   state,
   setState,
   onGoChat,
 }: {
+  libId: string
   state: KbState
   setState: (s: KbState) => void
   onGoChat: () => void
@@ -99,7 +101,7 @@ export function BuildWizard({
                   className="font-mono text-sm"
                 />
                 <Button
-                  onClick={() => run("scan", () => scanDir(dir), "扫描完成")}
+                  onClick={() => run("scan", () => scanDir(libId, dir), "扫描完成")}
                   disabled={pending || !dir.trim()}
                 >
                   {action === "scan" ? <Loader2 className="size-4 animate-spin" /> : "扫描"}
@@ -123,7 +125,7 @@ export function BuildWizard({
               <div>
                 <Button
                   variant="secondary"
-                  onClick={() => run("web", () => addWebSources(urls), "已添加网页来源")}
+                  onClick={() => run("web", () => addWebSources(libId, urls), "已添加网页来源")}
                   disabled={pending || !urls.trim()}
                 >
                   {action === "web" ? <Loader2 className="size-4 animate-spin" /> : "添加网页"}
@@ -135,7 +137,7 @@ export function BuildWizard({
           <SourceList
             sources={state.sources}
             disabled={pending}
-            onRemove={(id) => run("remove", () => removeSource(id))}
+            onRemove={(id) => run("remove", () => removeSource(libId, id))}
           />
 
           <Card className="flex flex-col gap-3 p-4">
@@ -155,7 +157,7 @@ export function BuildWizard({
             </p>
             <div>
               <Button
-                onClick={() => run("start", () => startBuild(prompt))}
+                onClick={() => run("start", () => startBuild(libId, prompt))}
                 disabled={pending || state.sources.length === 0}
               >
                 {action === "start" ? (
@@ -185,7 +187,7 @@ export function BuildWizard({
               busy={pending}
               submitLabel="提交并开始二筛 + 构建"
               onSubmit={(answers: AnswerInput[]) =>
-                run("r1", () => submitRound1(answers))
+                run("r1", () => submitRound1(libId, answers))
               }
             />
           )}
@@ -212,7 +214,7 @@ export function BuildWizard({
                 busy={pending}
                 submitLabel="提交并生成验收报告"
                 onSubmit={(answers: AnswerInput[]) =>
-                  run("r2", () => submitRound2(answers))
+                  run("r2", () => submitRound2(libId, answers))
                 }
               />
             )}

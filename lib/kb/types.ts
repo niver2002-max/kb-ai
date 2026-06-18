@@ -174,3 +174,44 @@ export interface ScanResult {
   sources: KbSource[]
   totalSize: number
 }
+
+// ===== 多知识库（每库 = 独立目录 + 独立 git + 独立会话 + 独立索引）=====
+
+// 知识库元信息（保存在 libraries.json 的注册表里，也冗余存一份在库目录）
+export interface KbLibrary {
+  id: string
+  title: string // 标题
+  audience: string // 主要面向什么 / 用途
+  rootDir: string // 知识库根目录（绝对路径）
+  hasGit: boolean // 是否已 git init
+  initialized: boolean // 目录分层 + 初始化是否完成
+  // 无资料口头建库：标记是否走联网检索建库
+  sourceMode: "materials" | "web" | "mixed"
+  createdAt: number
+  updatedAt: number
+}
+
+// ===== 持久化主会话（Gemini 无状态，持久化与压缩由我们实现）=====
+
+export type ChatRole = "user" | "assistant" | "system"
+
+export interface KbMessage {
+  id: string
+  role: ChatRole
+  content: string
+  // 本条回答引用到的来源 chunk（用于溯源展示）
+  citations?: Array<{ sourceId: string; name: string; loc?: string }>
+  // @某层级：本条消息限定的检索范围（分类 id 或来源 id）
+  scope?: { type: "category" | "source"; id: string; label: string } | null
+  createdAt: number
+}
+
+export interface KbSession {
+  libraryId: string
+  messages: KbMessage[]
+  // 滚动摘要：把超出窗口的旧对话压缩成一段不断更新的摘要
+  rollingSummary: string
+  // 已被纳入摘要的消息条数（之前的消息不再逐条发送给模型）
+  summarizedCount: number
+  updatedAt: number
+}
