@@ -7,6 +7,8 @@ import { MainSession, type ChatScope } from "@/components/kb/main-session"
 import { KnowledgeTree } from "@/components/kb/knowledge-tree"
 import { ImportMenu } from "@/components/kb/import-menu"
 import { BuildWizard } from "@/components/kb/build-wizard"
+import { ApiSettingsDialog } from "@/components/kb/api-settings"
+import { AutoIterateDialog } from "@/components/kb/auto-iterate-settings"
 import { Button } from "@/components/ui/button"
 import { Badge } from "@/components/ui/badge"
 import {
@@ -58,6 +60,8 @@ export function Workspace({
         <div className="ml-auto flex items-center gap-2">
           <ImportMenu libId={library.id} state={state} setState={setState} />
           <BuildSheet libId={library.id} state={state} setState={setState} />
+          <AutoIterateDialog libId={library.id} />
+          <ApiSettingsDialog />
         </div>
       </header>
 
