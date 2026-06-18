@@ -35,7 +35,10 @@ export function ApiSettingsDialog() {
   const [baseUrl, setBaseUrl] = useState("")
   const [apiKey, setApiKey] = useState("")
   const [model, setModel] = useState("")
+  const [inspectModel, setInspectModel] = useState("")
   const [embedModel, setEmbedModel] = useState("")
+  const [embedBaseUrl, setEmbedBaseUrl] = useState("")
+  const [embedApiKey, setEmbedApiKey] = useState("")
   const [temperature, setTemperature] = useState(0)
   const [stream, setStream] = useState(true)
 
@@ -51,7 +54,10 @@ export function ApiSettingsDialog() {
       setBaseUrl(s.baseUrl)
       setApiKey(s.apiKey)
       setModel(s.model)
+      setInspectModel(s.inspectModel)
       setEmbedModel(s.embedModel)
+      setEmbedBaseUrl(s.embedBaseUrl)
+      setEmbedApiKey(s.embedApiKey)
       setTemperature(s.temperature)
       setStream(s.stream)
       setLoaded(true)
@@ -133,7 +139,7 @@ export function ApiSettingsDialog() {
 
   function save() {
     startTransition(async () => {
-      await saveApiSettings({ baseUrl, apiKey, model, embedModel, temperature, stream })
+      await saveApiSettings({ baseUrl, apiKey, model, inspectModel, embedModel, embedBaseUrl, embedApiKey, temperature, stream })
       toast.success("设置已保存")
       setOpen(false)
     })
@@ -238,14 +244,61 @@ export function ApiSettingsDialog() {
           )}
 
           {/* 当前选定（手填兜底） */}
-          <div className="grid gap-3 sm:grid-cols-2">
+          <div className="grid gap-3 sm:grid-cols-3">
             <div className="flex flex-col gap-1.5">
-              <Label htmlFor="model">对话模型</Label>
+              <Label htmlFor="model">对话模型（活动对话）</Label>
               <Input id="model" value={model} onChange={(e) => setModel(e.target.value)} disabled={pending} className="font-mono text-sm" />
+            </div>
+            <div className="flex flex-col gap-1.5">
+              <Label htmlFor="inspect">巡检模型（高级）</Label>
+              <Input id="inspect" value={inspectModel} onChange={(e) => setInspectModel(e.target.value)} disabled={pending} className="font-mono text-sm" />
             </div>
             <div className="flex flex-col gap-1.5">
               <Label htmlFor="embed">向量模型</Label>
               <Input id="embed" value={embedModel} onChange={(e) => setEmbedModel(e.target.value)} disabled={pending} className="font-mono text-sm" />
+            </div>
+          </div>
+
+          {/* 列出模型后若没有任何嵌入模型，明确提示 */}
+          {models.length > 0 && embedModels.length === 0 && (
+            <p className="rounded-md border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-xs leading-relaxed text-amber-700 dark:text-amber-400">
+              当前主端点未提供向量（embedding）模型，语义检索将自动降级为关键词检索（BM25）。
+              如需语义检索，请在下方「独立嵌入端点」填入一个支持 embedding 的端点与密钥。
+            </p>
+          )}
+
+          {/* 独立嵌入端点：很多对话中转不带 embedding 模型，可单独指向带向量能力的端点；留空则复用主端点 */}
+          <div className="flex flex-col gap-3 rounded-md border p-3">
+            <div className="flex flex-col gap-1">
+              <Label className="text-sm font-medium">独立嵌入端点（可选）</Label>
+              <p className="text-xs text-muted-foreground">
+                留空则复用上方主端点。当主端点不提供向量模型时，在此单独配置一个支持 embedding 的端点。
+              </p>
+            </div>
+            <div className="grid gap-3 sm:grid-cols-2">
+              <div className="flex flex-col gap-1.5">
+                <Label htmlFor="embedBase">嵌入端点 URL</Label>
+                <Input
+                  id="embedBase"
+                  placeholder="https://带向量能力的端点 或 留空复用主端点"
+                  value={embedBaseUrl}
+                  onChange={(e) => setEmbedBaseUrl(e.target.value)}
+                  disabled={pending}
+                  className="font-mono text-sm"
+                />
+              </div>
+              <div className="flex flex-col gap-1.5">
+                <Label htmlFor="embedKey">嵌入端点 API Key</Label>
+                <Input
+                  id="embedKey"
+                  type="password"
+                  placeholder="留空则复用主端点密钥"
+                  value={embedApiKey}
+                  onChange={(e) => setEmbedApiKey(e.target.value)}
+                  disabled={pending}
+                  className="font-mono text-sm"
+                />
+              </div>
             </div>
           </div>
 

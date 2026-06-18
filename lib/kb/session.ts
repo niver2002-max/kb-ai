@@ -2,7 +2,7 @@ import { promises as fs } from "node:fs"
 import path from "node:path"
 import type { KbSession, KbMessage, KbChunk, KbSource } from "./types"
 import { DATA_DIR, readIndex } from "./store"
-import { searchChunks } from "./embed"
+import { hybridSearch } from "./search"
 import { geminiText } from "./gemini"
 
 // 每库一个会话文件：.kb-data/<libId>/session.json
@@ -143,6 +143,7 @@ export async function retrieveContext(
   query: string,
   scope?: { type: "category" | "source"; id: string } | null,
   topK = 8,
+  opts: { history?: string; expand?: boolean; useRerank?: boolean } = {},
 ): Promise<RetrievedContext> {
   if (!query) return { context: "", citations: [] }
   const index = await readIndex(libId)
@@ -160,7 +161,13 @@ export async function retrieveContext(
     }
   }
 
-  const hits = await searchChunks(query, chunks, topK)
+  // 完整混合检索流水线：多查询+HyDE → 向量&BM25 RRF 融合 → LLM 重排 → MMR 去冗
+  const hits = await hybridSearch(query, chunks, {
+    topK,
+    history: opts.history,
+    expand: opts.expand,
+    useRerank: opts.useRerank,
+  })
   const sourceById = new Map(sources.map((s) => [s.id, s]))
   const citations: RetrievedContext["citations"] = []
   const context = hits

@@ -177,22 +177,60 @@ export interface ScanResult {
 
 // ===== 多知识库（每库 = 独立目录 + 独立 git + 独立会话 + 独立索引）=====
 
-// 后台自迭代任务类型
-export type AutoIterateTask =
-  | "notes" // 生成/补全笔记与摘要
-  | "gaps" // 找知识缺口并联网补充
-  | "reindex" // 重建索引 / 去重 / 优化分类
+// ===== 高级模型巡检（goal 驱动的自迭代，由 gemini-3.1-pro 决策）=====
 
-// 后台自迭代配置（默认关闭，开启会持续消耗 token）
-export interface AutoIterateConfig {
-  enabled: boolean // 总开关，默认 false
-  tasks: AutoIterateTask[] // 要执行的任务（轮流执行）
-  intervalMinutes: number // 两次迭代最小间隔
-  idleMinutes: number // 多久无前台互动才算"空闲"可迭代
-  lastRunAt?: number // 上次迭代时间
-  lastTaskIndex?: number // 上次执行到的任务下标（用于轮转）
-  lastResult?: string // 上次迭代结果摘要（UI 展示）
-  running?: boolean // 是否正在迭代
+// 巡检每一轮 pro 决策出的动作
+export type InspectionAction =
+  | "notes" // 为缺摘要的来源生成/补全笔记
+  | "gaps" // 找知识缺口并联网检索补充
+  | "crawl" // 自动抓取具体网页/资料入库
+  | "reindex" // 重建索引 / 去重 / 补嵌入
+  | "eval" // 跑检索质量评估（生成测试问题集→真实检索→裁判打分），产出客观指标
+  | "none" // 无需动作（通常伴随 done）
+
+// 一道评估测试问题及其检索质量评判
+export interface EvalCase {
+  question: string
+  retrievalScore: number // 0-10：检索到的上下文能多大程度支撑回答
+  faithfulnessScore: number // 0-10：基于该上下文的答案忠实度（无幻觉）
+  missing: string // 评判指出缺失/薄弱之处（可空）
+}
+
+// 一次检索质量评估报告
+export interface EvalReport {
+  retrievalScore: number // 0-100 聚合检索得分
+  faithfulnessScore: number // 0-100 聚合忠实度
+  cases: EvalCase[]
+  weakTopics: string[] // 表现薄弱、值得补强的主题
+  summary: string
+  at: number
+}
+
+// 一轮巡检日志
+export interface InspectionRound {
+  round: number
+  completeness: number // pro 评估的完整度 0-100
+  action: InspectionAction
+  reason: string // pro 给出的理由
+  result: string // 执行结果摘要
+  at: number
+}
+
+// 巡检状态（持久化在库记录里；关窗/切库/重启都据此续跑）
+export interface InspectionState {
+  active: boolean // 是否处于巡检中
+  round: number // 已完成轮次
+  completeness: number // 最近一次完整度评分 0-100
+  currentAction: string // 当前正在做什么（UI 展示）
+  lastReport: string // 最新一轮报告（pro 输出的简述）
+  history: InspectionRound[] // 历次轮次日志（保留最近若干条）
+  done: boolean // pro 判定已无明显可迭代之处
+  stopRequested: boolean // 用户请求结束
+  running: boolean // 引擎是否正在跑某一轮（防重入）
+  lastEval?: EvalReport // 最近一次检索质量评估（客观指标，供 pro 决策与 UI 展示）
+  startedAt?: number
+  finishedAt?: number
+  error?: string
 }
 
 // 知识库元信息（保存在 libraries.json 的注册表里，也冗余存一份在库目录）
@@ -205,10 +243,8 @@ export interface KbLibrary {
   initialized: boolean // 目录分层 + 初始化是否完成
   // 无资料口头建库：标记是否走联网检索建库
   sourceMode: "materials" | "web" | "mixed"
-  // 后台自迭代配置（可选，缺省视为关闭）
-  autoIterate?: AutoIterateConfig
-  // 最近一次前台互动时间（用于空闲判定）
-  lastActiveAt?: number
+  // 高级模型巡检状态（可选，缺省视为未巡检）
+  inspection?: InspectionState
   createdAt: number
   updatedAt: number
 }

@@ -8,7 +8,7 @@ import { KnowledgeTree } from "@/components/kb/knowledge-tree"
 import { ImportMenu } from "@/components/kb/import-menu"
 import { BuildWizard } from "@/components/kb/build-wizard"
 import { ApiSettingsDialog } from "@/components/kb/api-settings"
-import { AutoIterateDialog } from "@/components/kb/auto-iterate-settings"
+import { InspectionPanel } from "@/components/kb/inspection-panel"
 import { Button } from "@/components/ui/button"
 import { Badge } from "@/components/ui/badge"
 import {
@@ -34,6 +34,9 @@ export function Workspace({
 }) {
   const [state, setState] = useState<KbState>(initialState)
   const [scope, setScope] = useState<ChatScope | null>(null)
+  // 巡检中：对话框置灰；对话生成中：禁用「开启巡检」
+  const [inspecting, setInspecting] = useState(false)
+  const [chatBusy, setChatBusy] = useState(false)
 
   // 知识树随 state 实时更新；导入菜单与构建向导通过 setState 推动更新
   useEffect(() => {
@@ -60,7 +63,6 @@ export function Workspace({
         <div className="ml-auto flex items-center gap-2">
           <ImportMenu libId={library.id} state={state} setState={setState} />
           <BuildSheet libId={library.id} state={state} setState={setState} />
-          <AutoIterateDialog libId={library.id} />
           <ApiSettingsDialog />
         </div>
       </header>
@@ -72,14 +74,22 @@ export function Workspace({
           <KnowledgeTree state={state} activeScope={scope} onScope={setScope} />
         </aside>
 
-        {/* 中：主会话 */}
+        {/* 中：主会话（上方为巡检面板） */}
         <main className="flex min-w-0 flex-1 flex-col">
+          <InspectionPanel
+            libId={library.id}
+            initialState={library.inspection}
+            chatBusy={chatBusy}
+            onInspectingChange={setInspecting}
+          />
           <MainSession
             libId={library.id}
             initialMessages={initialMessages}
             chunkCount={state.chunkCount}
             scope={scope}
             onClearScope={() => setScope(null)}
+            inspecting={inspecting}
+            onBusyChange={setChatBusy}
           />
         </main>
       </div>
