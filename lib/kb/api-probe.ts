@@ -123,18 +123,26 @@ export async function listModels(
   for (const base of candidates) {
     const r = await fetchModels(base, apiKey)
     if (r.ok && r.models) {
-      const models: ModelInfo[] = r.models.map((m) => {
-        const obj = m as { name?: string; displayName?: string; supportedGenerationMethods?: string[] }
-        const id = (obj.name ?? "").replace(/^models\//, "")
-        const methods = obj.supportedGenerationMethods ?? []
-        return {
-          id,
-          displayName: obj.displayName,
-          methods,
-          canGenerate: methods.includes("generateContent"),
-          canEmbed: methods.includes("embedContent"),
-        }
-      })
+      const models: ModelInfo[] = r.models
+        .map((m) => {
+          const obj = m as {
+            name?: string
+            id?: string
+            displayName?: string
+            supportedGenerationMethods?: string[] | null
+          }
+          // 兼容两种返回：Gemini 原生用 name="models/xxx"，部分中转用 id="xxx"
+          const id = (obj.name ?? obj.id ?? "").replace(/^models\//, "")
+          const methods = obj.supportedGenerationMethods ?? []
+          // 许多第三方中转不返回 supportedGenerationMethods（为 null/空），
+          // 此时用模型名启发式推断能力，避免列表全空。
+          const hasMethods = methods.length > 0
+          const looksEmbed = /embed|embedding/i.test(id)
+          const canGenerate = hasMethods ? methods.includes("generateContent") : !looksEmbed
+          const canEmbed = hasMethods ? methods.includes("embedContent") : looksEmbed
+          return { id, displayName: obj.displayName, methods, canGenerate, canEmbed }
+        })
+        .filter((m) => m.id) // 丢弃解析不出 id 的异常项
       return { ok: true, baseUrl: base, models, message: `发现 ${models.length} 个模型` }
     }
   }
