@@ -7,6 +7,7 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import { Card } from "@/components/ui/card"
 import { Chat } from "@/components/kb/chat"
 import { BuildWizard } from "@/components/kb/build-wizard"
+import { SiteCrawler } from "@/components/kb/site-crawler"
 import { formatSize } from "@/lib/kb/labels"
 import { Database, Files, Layers, Lock } from "lucide-react"
 
@@ -54,6 +55,7 @@ export function KnowledgeBase({ initial }: { initial: KbState }) {
       <Tabs value={tab} onValueChange={setTab} className="flex-1">
         <TabsList>
           <TabsTrigger value="build">构建流程</TabsTrigger>
+          <TabsTrigger value="crawl">站点抓取</TabsTrigger>
           <TabsTrigger value="chat" disabled={!chatReady} className="gap-1.5">
             对话问答
             {!chatReady && <Lock className="size-3" />}
@@ -62,6 +64,10 @@ export function KnowledgeBase({ initial }: { initial: KbState }) {
 
         <TabsContent value="build" className="mt-4">
           <BuildWizard state={state} setState={setState} onGoChat={() => setTab("chat")} />
+        </TabsContent>
+
+        <TabsContent value="crawl" className="mt-4">
+          <SiteCrawler state={state} setState={setState} />
         </TabsContent>
 
         <TabsContent value="chat" className="mt-4">

@@ -6,6 +6,13 @@ import { embedSegments, visionExtract } from "@/lib/kb/embed"
 import { geminiJson, geminiContents } from "@/lib/kb/gemini"
 import { mapLimit } from "@/lib/kb/concurrency"
 import {
+  classifySite,
+  enumerateSite,
+  selectLinks,
+  downloadToProject,
+  fetchLinkContent,
+} from "@/lib/kb/crawl"
+import {
   readIndex,
   upsertSources,
   updateSource,
@@ -15,6 +22,10 @@ import {
   resetIndex,
   patchWorkflow,
   readWorkflow,
+  upsertCrawl,
+  patchCrawl,
+  patchCrawlLinks,
+  readCrawl,
 } from "@/lib/kb/store"
 import type { KbSource, KbQuestion, KbCategory } from "@/lib/kb/types"
 
@@ -266,7 +277,7 @@ export async function startBuild(userPrompt: string) {
       `请基于这些资料，向用户提出 3-5 道**选择题**来澄清构建偏好，` +
       `例如：聚焦哪些主题/子系统、是否纳入低相关资料、知识库用途（速查/学习/问答）、` +
       `详略程度、是否需要联网补充背景等。每题给出 2-5 个可选项，合适的设为多选。` +
-      `intro 用一段话概述初筛发现（共多少份、主要类型、初步判断）。用中文。`,
+      `intro 用一��话概述初筛发现（共多少份、主要类型、初步判断）。用中文。`,
     QUESTIONS_SCHEMA,
     { thinking: "adaptive" },
   )
@@ -511,5 +522,190 @@ export async function restartWorkflow() {
     categories: [],
     busy: undefined,
   })
+  return getKbState()
+}
+
+// ===================================================================
+// 站点智能抓取编排（运行时由 Gemini 分诊，绝不按 URL 写死）
+//   crawlSite     → 分诊 + 遍历枚举 + 按目标选取，产出可勾选链接清单
+//   ingestFetchable → 把勾选的"可在线识别"链接抓取入库
+//   serverDownload  → 把勾选的"开放可下载"文件下到项目 downloads/ 并入库
+//   getDownloadManifest → 导出"需用户端下载"的链接清单（供一键批量下载）
+// ===================================================================
+
+// 返回抓取会话的精简状态
+export async function getCrawlState(crawlId: string) {
+  const site = await readCrawl(crawlId)
+  return site
+}
+
+// 一键抓取：分诊 → 枚举 → 按提示词选取。maxLinks 控制枚举上限，maxPick 控制最终保留数。
+export async function crawlSite(
+  rootUrl: string,
+  userPrompt: string,
+  opts?: { maxLinks?: number; maxPick?: number },
+) {
+  const url = (rootUrl || "").trim()
+  if (!/^https?:\/\//i.test(url)) throw new Error("请输入有效的 http(s) 网址")
+
+  // 1) 分诊
+  const site = await classifySite(url)
+  site.busy = "遍历站点中"
+  await upsertCrawl(site)
+
+  // 2) 枚举
+  const enumerated = await enumerateSite(site, {
+    maxLinks: opts?.maxLinks ?? 2000,
+    maxDepth: site.siteKind === "wiki" ? 0 : 2,
+  })
+  await patchCrawl(site.id, { busy: "AI 按目标筛选链接中" })
+
+  // 3) AI 选取 + 分类动作
+  const picked = await selectLinks(site, enumerated, userPrompt, opts?.maxPick ?? 60)
+  // 默认勾选可在线识别与开放下载的高相关项
+  const links = picked.map((l) => ({
+    ...l,
+    picked: l.action === "fetch" || l.action === "server_download",
+  }))
+
+  const updated = await patchCrawl(site.id, {
+    links,
+    busy: undefined,
+  })
+  return updated
+}
+
+// 把勾选的可在线识别链接（action=fetch）抓取并入库为知识库来源。
+export async function ingestFetchable(crawlId: string) {
+  const site = await readCrawl(crawlId)
+  if (!site) throw new Error("抓取会话不存在")
+  const targets = site.links.filter(
+    (l) => l.picked && l.action === "fetch" && !l.ingested,
+  )
+  if (targets.length === 0) return { ingested: 0, failed: 0, site }
+
+  let ingested = 0
+  let failed = 0
+  const concurrency = Number(process.env.KB_BUILD_CONCURRENCY ?? 4) || 4
+  await mapLimit(targets, concurrency, async (link) => {
+    try {
+      const md = await fetchLinkContent(link.url)
+      if (!md) throw new Error("正文为空")
+      // 组装成一个 web 来源并入库
+      const source: KbSource = {
+        id: `web-${link.id}`,
+        kind: "web",
+        location: link.url,
+        name: link.title || link.url,
+        category: "webpage",
+        ext: "",
+        sizeBytes: md.length,
+        status: "parsing",
+        updatedAt: Date.now(),
+      }
+      await upsertSources([source])
+      const chunks = chunkSegments([{ text: md, loc: link.url }])
+      const embedded = await embedSegments(source.id, chunks)
+      await replaceChunks(source.id, embedded)
+      await updateSource(source.id, {
+        status: "embedded",
+        charCount: md.length,
+        chunkCount: embedded.length,
+      })
+      await patchCrawlLinks(crawlId, [{ id: link.id, ingested: true }])
+      ingested++
+    } catch (err) {
+      await patchCrawlLinks(crawlId, [
+        { id: link.id, note: `抓取失败：${err instanceof Error ? err.message : String(err)}` },
+      ])
+      failed++
+    }
+  })
+
+  const updatedSite = await readCrawl(crawlId)
+  return { ingested, failed, site: updatedSite }
+}
+
+// 把勾选的开放可下载文件（action=server_download）下载到项目 downloads/，并尝试解析入库。
+export async function serverDownload(crawlId: string) {
+  const site = await readCrawl(crawlId)
+  if (!site) throw new Error("抓取会话不存在")
+  const targets = site.links.filter(
+    (l) => l.picked && l.action === "server_download" && !l.downloaded,
+  )
+  if (targets.length === 0) return { downloaded: 0, failed: 0, site }
+
+  let downloaded = 0
+  let failed = 0
+  const host = (() => {
+    try {
+      return new URL(site.rootUrl).hostname
+    } catch {
+      return "site"
+    }
+  })()
+
+  await mapLimit(targets, 3, async (link) => {
+    try {
+      await downloadToProject(link.url, host)
+      await patchCrawlLinks(crawlId, [{ id: link.id, downloaded: true }])
+      downloaded++
+    } catch (err) {
+      await patchCrawlLinks(crawlId, [
+        { id: link.id, note: `下载失败：${err instanceof Error ? err.message : String(err)}` },
+      ])
+      failed++
+    }
+  })
+
+  const updatedSite = await readCrawl(crawlId)
+  return { downloaded, failed, site: updatedSite }
+}
+
+// 导出"需用户在浏览器端下载"的链接清单（action=manual_download 且已勾选）。
+// 供前端用 File System Access API 一键批量下载到项目目录。
+export async function getDownloadManifest(crawlId: string) {
+  const site = await readCrawl(crawlId)
+  if (!site) return { rootUrl: "", host: "", items: [] as Array<{ url: string; name: string; note?: string }> }
+  const host = (() => {
+    try {
+      return new URL(site.rootUrl).hostname
+    } catch {
+      return "site"
+    }
+  })()
+  const items = site.links
+    .filter((l) => l.picked && l.action === "manual_download")
+    .map((l) => ({
+      url: l.url,
+      name: (decodeURIComponent(l.url.split("?")[0].split("/").pop() || "") || l.title || "file").replace(
+        /[^\w.\-]+/g,
+        "_",
+      ),
+      note: l.note,
+    }))
+  return { rootUrl: site.rootUrl, host, items }
+}
+
+// 更新链接勾选状态（前端勾选/取消）
+export async function setCrawlLinkPicked(
+  crawlId: string,
+  linkId: string,
+  picked: boolean,
+) {
+  return patchCrawlLinks(crawlId, [{ id: linkId, picked }])
+}
+
+// 触发一次目录重扫（用户把手动下载的文件放进 downloads/ 后调用）
+export async function rescanDownloads() {
+  const { DOWNLOADS_DIR } = await import("@/lib/kb/crawl")
+  const fs = await import("node:fs/promises")
+  try {
+    await fs.mkdir(DOWNLOADS_DIR, { recursive: true })
+  } catch {
+    // 忽略
+  }
+  const result = await scanDirectory(DOWNLOADS_DIR)
+  await upsertSources(result.sources)
   return getKbState()
 }

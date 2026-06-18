@@ -105,6 +105,54 @@ export interface KbWorkflow {
   updatedAt: number
 }
 
+// ===== 站点智能抓取（运行时由 Gemini 分诊，不按 URL 写死）=====
+
+// 站点类型：由 Gemini 在运行时分诊得出
+export type SiteKind =
+  | "wiki" // 文档/百科类，正文可直接在线识别
+  | "open_download" // 开放下载站，文件无需登录即可下载
+  | "login_download" // 需登录的下载站
+  | "generic" // 普通网页/其它
+  | "unknown"
+
+// 一条被发现的链接及其处理判定
+export type LinkAction =
+  | "fetch" // 可在线抓取识别（网页/PDF 等）
+  | "server_download" // 服务端可直接下载（开放二进制文件）
+  | "manual_download" // 需用户在浏览器端下载（受登录保护或无法在线识别）
+  | "traverse" // 子目录/子页面，需继续遍历
+  | "skip" // 与目标无关，跳过
+
+export interface KbCrawlLink {
+  id: string
+  url: string
+  title: string
+  // 链接指向的内容类型推断
+  kind: "page" | "file" | "dir"
+  ext?: string
+  action: LinkAction
+  relevance?: number // 0-1，AI 按提示词目标评估
+  note?: string
+  // 处理状态
+  picked?: boolean // 用户是否勾选
+  ingested?: boolean // 是否已抓取入库
+  downloaded?: boolean // 是否已下载到项目目录
+}
+
+// 一次站点抓取会话
+export interface KbCrawlSite {
+  id: string
+  rootUrl: string
+  siteKind: SiteKind
+  requiresLogin: boolean
+  // 分诊说明 + 采用的遍历策略描述
+  summary: string
+  strategy: string
+  links: KbCrawlLink[]
+  busy?: string
+  updatedAt: number
+}
+
 export interface KbIndex {
   // 知识库元信息
   rootDir: string | null
@@ -114,6 +162,7 @@ export interface KbIndex {
   sources: KbSource[]
   chunks: KbChunk[]
   workflow: KbWorkflow
+  crawls: KbCrawlSite[]
 }
 
 export interface ScanResult {

@@ -1,6 +1,13 @@
 import { promises as fs } from "node:fs"
 import path from "node:path"
-import type { KbIndex, KbSource, KbChunk, KbWorkflow } from "./types"
+import type {
+  KbIndex,
+  KbSource,
+  KbChunk,
+  KbWorkflow,
+  KbCrawlSite,
+  KbCrawlLink,
+} from "./types"
 
 // 知识库数据全部存放在项目根目录下的 .kb-data 文件夹（纯本地，无需任何云数据库）
 const DATA_DIR = path.join(process.cwd(), ".kb-data")
@@ -29,6 +36,7 @@ function emptyIndex(): KbIndex {
     sources: [],
     chunks: [],
     workflow: emptyWorkflow(),
+    crawls: [],
   }
 }
 
@@ -47,6 +55,7 @@ export async function readIndex(): Promise<KbIndex> {
     if (!parsed.sources) parsed.sources = []
     if (!parsed.chunks) parsed.chunks = []
     if (!parsed.workflow) parsed.workflow = emptyWorkflow()
+    if (!parsed.crawls) parsed.crawls = []
     return parsed
   } catch {
     return emptyIndex()
@@ -129,6 +138,55 @@ export async function readWorkflow(): Promise<KbWorkflow> {
 
 export async function resetIndex(): Promise<void> {
   await writeIndex(emptyIndex())
+}
+
+// ===== 站点抓取会话的读写 =====
+
+// 新增或整体替换一个抓取会话（按 id）
+export async function upsertCrawl(site: KbCrawlSite): Promise<KbCrawlSite> {
+  const index = await readIndex()
+  const i = index.crawls.findIndex((c) => c.id === site.id)
+  site.updatedAt = Date.now()
+  if (i >= 0) index.crawls[i] = site
+  else index.crawls.push(site)
+  await writeIndex(index)
+  return site
+}
+
+// 局部更新一个抓取会话
+export async function patchCrawl(
+  id: string,
+  patch: Partial<KbCrawlSite>,
+): Promise<KbCrawlSite | null> {
+  const index = await readIndex()
+  const i = index.crawls.findIndex((c) => c.id === id)
+  if (i < 0) return null
+  index.crawls[i] = { ...index.crawls[i], ...patch, id, updatedAt: Date.now() }
+  await writeIndex(index)
+  return index.crawls[i]
+}
+
+// 更新某抓取会话内的若干链接（按 link id 合并 patch）
+export async function patchCrawlLinks(
+  id: string,
+  patches: Array<{ id: string } & Partial<KbCrawlLink>>,
+): Promise<KbCrawlSite | null> {
+  const index = await readIndex()
+  const site = index.crawls.find((c) => c.id === id)
+  if (!site) return null
+  const byId = new Map(patches.map((p) => [p.id, p]))
+  site.links = site.links.map((l) => {
+    const p = byId.get(l.id)
+    return p ? { ...l, ...p, id: l.id } : l
+  })
+  site.updatedAt = Date.now()
+  await writeIndex(index)
+  return site
+}
+
+export async function readCrawl(id: string): Promise<KbCrawlSite | null> {
+  const index = await readIndex()
+  return index.crawls.find((c) => c.id === id) ?? null
 }
 
 export { EMBEDDING_MODEL }
