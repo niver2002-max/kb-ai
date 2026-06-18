@@ -92,9 +92,10 @@ async function walk(
 }
 
 // 扫描目录，返回每个文件的来源条目（尚未解析）
+// 默认 maxDepth 设为极大值 = 自动穿透所有子目录（无论多深），不再限制层级。
 export async function scanDirectory(
   rootDir: string,
-  maxDepth = 6,
+  maxDepth = Number.POSITIVE_INFINITY,
 ): Promise<ScanResult> {
   const abs = path.resolve(rootDir)
   const stat = await fs.stat(abs) // 不存在会抛错，交由上层捕获

@@ -131,6 +131,19 @@ export function SiteCrawler({
     })
   }
 
+  // 批量勾选/取消一组链接（按主题分组「全选」用）
+  function toggleMany(targets: KbCrawlLink[], next: boolean) {
+    if (!site || targets.length === 0) return
+    const ids = new Set(targets.map((l) => l.id))
+    setSite({
+      ...site,
+      links: site.links.map((l) => (ids.has(l.id) ? { ...l, picked: next } : l)),
+    })
+    startTransition(async () => {
+      for (const l of targets) await setCrawlLinkPicked(libId, site.id, l.id, next)
+    })
+  }
+
   function runIngest() {
     if (!site) return
     setBusyLabel("在线抓取识别并入库中…")
@@ -254,7 +267,8 @@ export function SiteCrawler({
         </div>
         <p className="text-pretty text-sm leading-relaxed text-muted-foreground">
           输入任意网址，AI 自动分辨站点类型（文档站 / 开放下载站 / 需登录下载站）并选择遍历策略：
-          先快速遍历，再按你的目标挑出相关链接。可在线识别的直接入库；开放文件服务端下载；
+          自动穿透所有子目录深度遍历，再按目标挑出相关链接并<strong>按主题分类</strong>，你可整组全选而非逐条勾选。
+          提示词可留空——将自动按知识库标题与用途筛选。可在线识别的直接入库；开放文件服务端下载；
           需登录的文件列出清单，你在浏览器登录后一键批量下载到项目 <code className="font-mono">downloads/</code> 目录。
         </p>
         <div className="flex flex-col gap-3">
@@ -269,10 +283,12 @@ export function SiteCrawler({
             />
           </div>
           <div className="flex flex-col gap-1.5">
-            <Label htmlFor="crawl-prompt">抓取目标 / 提示词</Label>
+            <Label htmlFor="crawl-prompt">
+              抓取目标 / 提示词 <span className="font-normal text-muted-foreground">（可留空，将自动按知识库标题与用途筛选）</span>
+            </Label>
             <Textarea
               id="crawl-prompt"
-              placeholder="例��：收�� Tang FPGA 的数据手册与引脚封装资料"
+              placeholder="例如：收集 Tang FPGA 的数据手册与引脚封装资料（留空则按知识库标题/用途自动筛选）"
               value={prompt}
               onChange={(e) => setPrompt(e.target.value)}
               disabled={pending}
@@ -377,13 +393,13 @@ export function SiteCrawler({
             </div>
           )}
 
-          {/* 链接分组清单 */}
+          {/* 链接分组清单：按 AI 主题分类聚合，可整组全选 */}
           <div className="flex flex-col gap-4">
-            <LinkGroup title="可在线识别" links={fetchable} onToggle={togglePick} />
-            <LinkGroup title="开放可下载" links={serverDl} onToggle={togglePick} />
-            <LinkGroup title="需手动下载（登录/不可在线识别）" links={manualDl} onToggle={togglePick} />
+            <LinkGroup title="可在线识别" links={fetchable} onToggle={togglePick} onToggleMany={toggleMany} />
+            <LinkGroup title="开放可下载" links={serverDl} onToggle={togglePick} onToggleMany={toggleMany} />
+            <LinkGroup title="需手动下载（登录/不可在线识别）" links={manualDl} onToggle={togglePick} onToggleMany={toggleMany} />
             <LinkGroup
-              title="子目录（点「深入」继续抓取）"
+              title="子目录（已自动深入，如需可再手动深入）"
               links={traverse}
               onToggle={togglePick}
               readonly
@@ -400,23 +416,98 @@ function LinkGroup({
   title,
   links,
   onToggle,
+  onToggleMany,
   readonly,
   onDeepCrawl,
 }: {
   title: string
   links: KbCrawlLink[]
   onToggle: (l: KbCrawlLink) => void
+  onToggleMany?: (targets: KbCrawlLink[], next: boolean) => void
   readonly?: boolean
   onDeepCrawl?: (url: string) => void
 }) {
   if (links.length === 0) return null
+
+  // 按 AI 主题分组聚合（无 group 的归入「其它」）
+  const groups = new Map<string, KbCrawlLink[]>()
+  for (const l of links) {
+    const g = (l.group || "其它").trim() || "其它"
+    if (!groups.has(g)) groups.set(g, [])
+    groups.get(g)!.push(l)
+  }
+  // 主题按数量降序，便于浏览
+  const grouped = Array.from(groups.entries()).sort((a, b) => b[1].length - a[1].length)
+
   return (
-    <div className="flex flex-col gap-2">
+    <div className="flex flex-col gap-3">
       <div className="flex items-center gap-2">
         <h3 className="text-xs font-semibold text-muted-foreground">{title}</h3>
         <Badge variant="outline" className="font-mono text-[10px]">
           {links.length}
         </Badge>
+        {!readonly && <span className="text-[10px] text-muted-foreground">· {grouped.length} 个主题</span>}
+      </div>
+
+      {grouped.map(([groupName, groupLinks]) => (
+        <TopicGroup
+          key={groupName}
+          name={groupName}
+          links={groupLinks}
+          onToggle={onToggle}
+          onToggleMany={onToggleMany}
+          readonly={readonly}
+          onDeepCrawl={onDeepCrawl}
+        />
+      ))}
+    </div>
+  )
+}
+
+// 单个主题分组：标题行带「全选/取消」，下面是该主题的链接条目。
+function TopicGroup({
+  name,
+  links,
+  onToggle,
+  onToggleMany,
+  readonly,
+  onDeepCrawl,
+}: {
+  name: string
+  links: KbCrawlLink[]
+  onToggle: (l: KbCrawlLink) => void
+  onToggleMany?: (targets: KbCrawlLink[], next: boolean) => void
+  readonly?: boolean
+  onDeepCrawl?: (url: string) => void
+}) {
+  const pickedCount = links.filter((l) => l.picked).length
+  const allPicked = pickedCount === links.length && links.length > 0
+  return (
+    <div className="flex flex-col gap-1.5 rounded-md border bg-muted/20 p-2.5">
+      <div className="flex items-center gap-2">
+        {!readonly && onToggleMany && (
+          <Checkbox
+            checked={allPicked}
+            onCheckedChange={() => onToggleMany(links, !allPicked)}
+            aria-label={`全选主题 ${name}`}
+          />
+        )}
+        <Badge variant="secondary" className="text-[11px]">
+          {name}
+        </Badge>
+        <span className="font-mono text-[10px] text-muted-foreground">
+          {readonly ? `${links.length}` : `${pickedCount}/${links.length}`}
+        </span>
+        {!readonly && onToggleMany && (
+          <Button
+            size="sm"
+            variant="link"
+            className="ml-auto h-auto px-0 py-0 text-[11px]"
+            onClick={() => onToggleMany(links, !allPicked)}
+          >
+            {allPicked ? "取消整组" : "全选整组"}
+          </Button>
+        )}
       </div>
       <div className="flex flex-col gap-1.5">
         {links.map((l) => {
