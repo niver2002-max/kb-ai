@@ -39,8 +39,12 @@ jobs:
             echo "version=v0.0.0-$(date +%Y%m%d)-${GITHUB_RUN_NUMBER}" >> "$GITHUB_OUTPUT"
           fi
 
-      - name: Install dependencies
-        run: pnpm install --frozen-lockfile
+      # 关键：用 hoisted（扁平）node_modules 安装，使 standalone 产物不含任何软链接。
+      # pnpm 默认的 .pnpm 软链结构在 zip 压缩 + Windows 解压后会断链，
+      # 导致运行时报 "Cannot find module @next/env / @swc/helpers" 等。
+      # hoisted 结构是真实文件目录（与 npm 一致），可在 Windows 直接运行。
+      - name: Install dependencies (hoisted, symlink-free)
+        run: pnpm install --frozen-lockfile --config.node-linker=hoisted
 
       - name: Build (standalone)
         run: pnpm build
@@ -57,36 +61,15 @@ jobs:
           cp -r .next/static "$DIST/.next/static"
           if [ -d public ]; then cp -r public "$DIST/public"; fi
 
-          # Next 16/Turbopack 的 standalone 依赖追踪偶尔会漏掉运行时必需的包
-          # （典型：@swc/helpers、tslib），导致本地启动报 "Cannot find module"。
-          # 注意：pnpm 用 .pnpm 软链结构，顶层 node_modules 不含间接依赖，
-          # 因此需从 .pnpm store 里按 glob 解析真实路径再补齐。
-          ensure_pkg() {
-            local pkg="$1"            # 例如 @swc/helpers
-            local store_name="$2"     # .pnpm 目录名前缀，例如 @swc+helpers
-            if [ -d "$DIST/node_modules/$pkg" ]; then return 0; fi
-            # 优先用顶层（npm/yarn 扁平结构），否则回退 pnpm store
-            local src=""
-            if [ -d "node_modules/$pkg" ]; then
-              src="node_modules/$pkg"
-            else
-              src=$(ls -d node_modules/.pnpm/${store_name}@*/node_modules/$pkg 2>/dev/null | head -1)
-            fi
-            if [ -n "$src" ] && [ -d "$src" ]; then
-              echo "Backfilling missing dependency: $pkg (from $src)"
-              mkdir -p "$DIST/node_modules/$(dirname "$pkg")"
-              cp -rL "$src" "$DIST/node_modules/$pkg"
-            fi
-          }
-          ensure_pkg "@swc/helpers" "@swc+helpers"
-          ensure_pkg "tslib" "tslib"
-          ensure_pkg "styled-jsx" "styled-jsx"
-
-          # 兜底校验：确认报错涉及的关键模块确实已就位，否则让构建失败而不是发出坏包。
-          if [ ! -f "$DIST/node_modules/@swc/helpers/package.json" ]; then
-            echo "ERROR: @swc/helpers missing from release bundle" >&2
+          # 安全校验：hoisted 安装后产物应当不含任何软链接（软链接在 Windows 解压后会断）。
+          # 若仍出现软链接，说明安装方式有误，直接让发布失败，绝不发出坏包。
+          LINK_COUNT=$(find "$DIST" -type l 2>/dev/null | wc -l | tr -d ' ')
+          if [ "$LINK_COUNT" != "0" ]; then
+            echo "ERROR: 发布包内仍有 $LINK_COUNT 个软链接，Windows 解压后会断链。" >&2
+            find "$DIST" -type l 2>/dev/null | head -20 >&2
             exit 1
           fi
+          echo "OK: 发布包零软链接，可在 Windows 直接运行。"
 
           # Windows 一键启动脚本（双击运行）。默认端口 3000，可用 set PORT=xxxx 覆盖。
           # 注意：脚本内容必须全为 ASCII 英文。cmd.exe 按本地代码页逐字节解析 .bat，
@@ -170,6 +153,30 @@ jobs:
 
           数据存放：知识库数据写在你新建库时指定的目录；应用配置写在运行目录下的 .kb-data/ 内。
           EOF
+
+      # 真正启动一次发布包并探测，确保不会再发出"能下载但启动崩溃"的坏包。
+      # 任何缺模块 / 启动失败都会让发布中止。
+      - name: Smoke test release bundle
+        run: |
+          set -e
+          cd release/kb-ai
+          PORT=3999 HOSTNAME=127.0.0.1 node server.js > /tmp/smoke.log 2>&1 &
+          SVPID=$!
+          ok=0
+          for i in $(seq 1 20); do
+            code=$(curl -s -o /dev/null -w "%{http_code}" http://127.0.0.1:3999 || echo 000)
+            if [ "$code" = "200" ]; then ok=1; break; fi
+            # 进程已退出说明启动崩溃，立即失败
+            if ! kill -0 $SVPID 2>/dev/null; then break; fi
+            sleep 1
+          done
+          kill $SVPID 2>/dev/null || true
+          echo "----- server log -----"; cat /tmp/smoke.log || true
+          if [ "$ok" != "1" ]; then
+            echo "ERROR: 发布包启动探测失败（未返回 200）。" >&2
+            exit 1
+          fi
+          echo "OK: 发布包启动正常，首页返回 200。"
 
       - name: Create zip
         run: |

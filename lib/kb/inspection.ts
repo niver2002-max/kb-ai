@@ -172,7 +172,7 @@ async function decide(lib: KbLibrary): Promise<Decision> {
     `判断原则：优先把已有资料的摘要补全，再补缺口，再抓取外部资料，最后整理索引。\n` +
     `重要：在判定 done 之前，至少应跑过一次 eval 用客观检索得分佐证；` +
     `若客观检索得分偏低或存在薄弱点，应据此继续补强而非草率收尾。\n` +
-    `当知识库对其目标用途已足够完整、且客观检索得分高、再迭代收益很低时，done=true。`
+    `当知识库对其目标用途已足够完整、且客观检索得分高���再迭代收益很低时，done=true。`
   return geminiJson<Decision>(prompt, DECISION_SCHEMA, {
     model: inspectModel(),
     thinking: "adaptive",
@@ -231,46 +231,86 @@ async function execGaps(lib: KbLibrary, target?: string): Promise<string> {
   }
   if (gaps.length === 0) return "未识别到明显缺口"
   let filled = 0
+  let skipped = 0
+  let totalChunks = 0
   for (const gap of gaps) {
-    const supplement = await geminiSearch(
+    const { text, sources } = await geminiSearchSourced(
       `围绕「${gap}」，面向「${lib.audience || "通用"}」整理一份准确、可引用的中文资料综述，` +
-        `包含关键概念、要点、常见误区与权威来源链接。`,
+        `包含关键概念、要点、常见误区与权威来源。务必基于联网检索的真实信息，不要编造。`,
       { model: inspectModel(), thinking: "adaptive" },
     )
+    // 质量门槛：内容过短/为空视为无效，不入库
+    if (!isUsableSupplement(text)) {
+      skipped++
+      continue
+    }
+    const body = text.trim() + formatSources(sources)
+    // 写笔记备查
     await writeNote(
       lib,
       `gap-${nowStamp()}-${safeName(gap)}.md`,
-      `# 知识缺口补充：${gap}\n\n> 巡检联网补充于 ${new Date().toLocaleString()}\n\n${supplement}\n`,
+      `# 知识缺口补充：${gap}\n\n> 巡检联网补充于 ${new Date().toLocaleString()}\n\n${body}\n`,
     )
+    // 关键：真正切块+嵌入+入检索索引，使补充内容可被对话检索到
+    const r = await ingestText({
+      libId: lib.id,
+      name: `缺口补充：${gap}`,
+      text: body,
+      category: "联网补充",
+      kind: "gap",
+      url: sources[0]?.uri,
+    })
+    totalChunks += r.chunks
     filled++
   }
-  return `识别并联网补充 ${filled} 个缺口（${gaps.join("、")}）`
+  if (filled === 0) return `联网补充未获得有效内容（跳过 ${skipped} 个低质量结果）`
+  return (
+    `联网补充并入库 ${filled} 个缺口、共 ${totalChunks} 个检索片段` +
+    (skipped ? `（跳过 ${skipped} 个低质量结果）` : "") +
+    `：${gaps.join("、")}`
+  )
 }
 
 async function execCrawl(lib: KbLibrary, target?: string): Promise<string> {
   const t = target?.trim()
   if (!t) return "未指定抓取目标，跳过"
   const isUrl = /^https?:\/\//i.test(t)
-  let content: string
+  let text: string
+  let sources: GroundSource[]
   if (isUrl) {
-    content = await geminiUrlContext(
+    const r = await geminiUrlSourced(
       t,
-      `请抓取该网页正文，面向「${lib.audience || "通用"}」整理为准确的中文资料，剔除导航与广告。`,
+      `请抓取该网页正文，面向「${lib.audience || "通用"}」整理为准确的中文资料，剔除导航与广告。基于网页真实内容，不要编造。`,
       { model: inspectModel(), thinking: "adaptive" },
     )
+    text = r.text
+    sources = r.sources.length ? r.sources : [{ uri: t, title: t }]
   } else {
-    content = await geminiSearch(
-      `检索并抓取关于「${t}」的权威在线资料，面向「${lib.audience || "通用"}」整理为准确、可引用的中文综述，` +
-        `附上来源链接。`,
+    const r = await geminiSearchSourced(
+      `检索并抓取关于「${t}」的权威在线资料，面向「${lib.audience || "通用"}」整理为准确、可引用的中文综述。` +
+        `务必基于联网检索的真实信息，不要编造。`,
       { model: inspectModel(), thinking: "adaptive" },
     )
+    text = r.text
+    sources = r.sources
   }
+  if (!isUsableSupplement(text)) return `抓取「${t}」未获得有效内容，已跳过`
+  const body = text.trim() + formatSources(sources)
   await writeNote(
     lib,
     `crawl-${nowStamp()}-${safeName(t)}.md`,
-    `# 抓取资料：${t}\n\n> 巡检抓取于 ${new Date().toLocaleString()}\n\n${content}\n`,
+    `# 抓取资料：${t}\n\n> 巡检抓取于 ${new Date().toLocaleString()}\n\n${body}\n`,
   )
-  return `抓取并入库：${t}`
+  // 真正入检索索引
+  const r = await ingestText({
+    libId: lib.id,
+    name: `抓取资料：${t}`,
+    text: body,
+    category: "联网补充",
+    kind: "crawl",
+    url: isUrl ? t : sources[0]?.uri,
+  })
+  return `抓取并入库：${t}（${r.chunks} 个检索片段）`
 }
 
 async function execReindex(lib: KbLibrary): Promise<string> {
