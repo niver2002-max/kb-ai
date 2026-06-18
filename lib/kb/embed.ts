@@ -50,7 +50,8 @@ function guessMime(ext: string): string {
   if (e === ".gif") return "image/gif"
   if (e === ".webp") return "image/webp"
   if (e === ".bmp") return "image/bmp"
-  if (e === ".tiff") return "image/tiff"
+  if (e === ".tiff" || e === ".tif") return "image/tiff"
+  if (e === ".pdf") return "application/pdf"
   return "image/jpeg"
 }
 

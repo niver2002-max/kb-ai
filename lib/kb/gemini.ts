@@ -145,6 +145,30 @@ export async function geminiParts(parts: GenPart[], opts: GenOpts = {}): Promise
   return callGenerate(body)
 }
 
+// 原生 PDF 文档理解：把整份 PDF 以 application/pdf inlineData 直接发给模型。
+// Gemini 原生会同时理解文字、图形、表格，并保留跨页上下文——这是处理
+// 引脚手册/数据手册/原理图类 PDF 的正确方式（非流式，带 adaptive 动态思考）。
+// inline 方式适用于 <20MB 的文件；更大的需走 Files API（后续增强）。
+export async function geminiPdf(
+  base64: string,
+  instruction: string,
+  opts: GenOpts = {},
+): Promise<string> {
+  const body = buildBody(
+    [
+      {
+        role: "user",
+        parts: [
+          { text: instruction },
+          { inlineData: { mimeType: "application/pdf", data: base64 } },
+        ],
+      },
+    ],
+    { thinking: "adaptive", ...opts },
+  )
+  return callGenerate(body)
+}
+
 // 多轮对话（非流式）——直接走 generateContent，对第三方中转兼容性最好。
 // 返回完整回答文本（已过滤 thought 摘要）。
 export async function geminiContents(
