@@ -839,11 +839,14 @@ async function autoTraverse(
 
     for (const dir of dirs) {
       if (traversedCount >= MAX_TRAVERSE || byUrl.size >= limits.maxLinks) break
+      // 剩余容量过小时跳过昂贵的枚举+AI筛选调用
+      const remaining = limits.maxLinks - byUrl.size
+      if (remaining < 20) break
       visited.add(dir.url)
       traversedCount++
       try {
         const subSite = { ...site, rootUrl: dir.url }
-        const subEnum = await enumerateSite(subSite, { maxLinks: 800, maxDepth: 1 })
+        const subEnum = await enumerateSite(subSite, { maxLinks: Math.min(800, remaining), maxDepth: 1 })
         const subPicked = await selectLinks(subSite, subEnum, goal, limits.maxPick)
         for (const l of subPicked) {
           if (byUrl.size >= limits.maxLinks) break

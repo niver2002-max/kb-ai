@@ -11,10 +11,13 @@
 //     或用户手动结束，或达到硬性轮次上限兜底。
 import { promises as fs } from "node:fs"
 import path from "node:path"
+import { createHash } from "node:crypto"
 import type { InspectionState, InspectionRound, InspectionAction, KbLibrary } from "./types"
 import { getLibrary, patchLibrary, listLibraries } from "./library"
-import { readIndex, writeIndex, updateSource } from "./store"
+import { readIndex, writeIndex, updateSource, replaceChunks, upsertSources } from "./store"
 import { geminiJson, geminiText, geminiSearch, geminiUrlContext, geminiEmbedBatch } from "./gemini"
+import { chunkSegments, type ParsedSegment } from "./parse"
+import { embedSegments } from "./embed"
 import { getSettings } from "./settings"
 import { evalRetrieval } from "./eval"
 
@@ -76,6 +79,33 @@ function nowStamp(): string {
 
 function safeName(s: string): string {
   return s.replace(/[^\w\u4e00-\u9fa5.-]+/g, "_").slice(0, 40)
+}
+
+// 将文本内容切块、嵌入并写入检索索引，使其可被对话检索到。
+async function ingestText(
+  libId: string,
+  opts: { name: string; text: string; category?: string; kind?: string; url?: string },
+): Promise<{ chunks: number }> {
+  const sourceId = createHash("sha1").update(`${libId}:${opts.name}`).digest("hex").slice(0, 16)
+  const segments: ParsedSegment[] = chunkSegments([{ text: opts.text }])
+  const chunks = await embedSegments(sourceId, segments)
+  await upsertSources(libId, [
+    {
+      id: sourceId,
+      kind: "web" as const,
+      location: opts.url || `inspection://${opts.name}`,
+      name: opts.name,
+      category: "document" as const,
+      ext: ".md",
+      sizeBytes: Buffer.byteLength(opts.text, "utf8"),
+      status: "embedded" as const,
+      charCount: opts.text.length,
+      chunkCount: chunks.length,
+      updatedAt: Date.now(),
+    },
+  ])
+  await replaceChunks(libId, sourceId, chunks)
+  return { chunks: chunks.length }
 }
 
 // ===== 知识库快照（供 pro 决策）=====
@@ -232,6 +262,7 @@ async function execGaps(lib: KbLibrary, target?: string): Promise<string> {
   if (gaps.length === 0) return "未识别到明显缺口"
   let filled = 0
   let skipped = 0
+  let totalChunks = 0
   for (const gap of gaps) {
     const text = await geminiSearch(
       `围绕「${gap}」，面向「${lib.audience || "通用"}」整理一份准确、可引用的中文资料综述，` +
@@ -243,16 +274,23 @@ async function execGaps(lib: KbLibrary, target?: string): Promise<string> {
       skipped++
       continue
     }
+    const body = text.trim()
     await writeNote(
       lib,
       `gap-${nowStamp()}-${safeName(gap)}.md`,
-      `# 知识缺口补充：${gap}\n\n> 巡检联网补充于 ${new Date().toLocaleString()}\n\n${text.trim()}\n`,
+      `# 知识缺口补充：${gap}\n\n> 巡检联网补充于 ${new Date().toLocaleString()}\n\n${body}\n`,
     )
+    const r = await ingestText(lib.id, {
+      name: `缺口补充：${gap}`,
+      text: body,
+      url: undefined,
+    })
+    totalChunks += r.chunks
     filled++
   }
   if (filled === 0) return `联网补充未获得有效内容（跳过 ${skipped} 个低质量结果）`
   return (
-    `识别并联网补充 ${filled} 个缺口` +
+    `联网补充并入库 ${filled} 个缺口、共 ${totalChunks} 个检索片段` +
     (skipped ? `（跳过 ${skipped} 个低质量结果）` : "") +
     `：${gaps.join("、")}`
   )
@@ -277,12 +315,18 @@ async function execCrawl(lib: KbLibrary, target?: string): Promise<string> {
     )
   }
   if (!text || text.trim().length < 40) return `抓取「${t}」未获得有效内容，已跳过`
+  const body = text.trim()
   await writeNote(
     lib,
     `crawl-${nowStamp()}-${safeName(t)}.md`,
-    `# 抓取资料：${t}\n\n> 巡检抓取于 ${new Date().toLocaleString()}\n\n${text.trim()}\n`,
+    `# 抓取资料：${t}\n\n> 巡检抓取于 ${new Date().toLocaleString()}\n\n${body}\n`,
   )
-  return `抓取并入库：${t}`
+  const r = await ingestText(lib.id, {
+    name: `抓取资料：${t}`,
+    text: body,
+    url: isUrl ? t : undefined,
+  })
+  return `抓取并入库：${t}（${r.chunks} 个检索片段）`
 }
 
 async function execReindex(lib: KbLibrary): Promise<string> {

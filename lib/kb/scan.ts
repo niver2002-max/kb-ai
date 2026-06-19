@@ -72,6 +72,7 @@ async function walk(
   maxDepth: number,
   depth: number,
   out: string[],
+  visited: Set<string>,
 ): Promise<void> {
   let entries: Dirent[]
   try {
@@ -84,7 +85,18 @@ async function walk(
     const full = path.join(dir, entry.name)
     if (entry.isDirectory()) {
       if (IGNORE_DIRS.has(entry.name)) continue
-      if (depth < maxDepth) await walk(full, maxDepth, depth + 1, out)
+      if (depth < maxDepth) {
+        // 解析真实路径以检测 symlink 循环
+        let real: string
+        try {
+          real = await fs.realpath(full)
+        } catch {
+          continue
+        }
+        if (visited.has(real)) continue
+        visited.add(real)
+        await walk(full, maxDepth, depth + 1, out, visited)
+      }
     } else if (entry.isFile()) {
       out.push(full)
     }
@@ -104,7 +116,8 @@ export async function scanDirectory(
   }
 
   const files: string[] = []
-  await walk(abs, maxDepth, 0, files)
+  const visited = new Set<string>([abs])
+  await walk(abs, maxDepth, 0, files, visited)
 
   const sources: KbSource[] = []
   let totalSize = 0

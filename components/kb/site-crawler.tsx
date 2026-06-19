@@ -140,7 +140,19 @@ export function SiteCrawler({
       links: site.links.map((l) => (ids.has(l.id) ? { ...l, picked: next } : l)),
     })
     startTransition(async () => {
-      for (const l of targets) await setCrawlLinkPicked(libId, site.id, l.id, next)
+      try {
+        for (const l of targets) await setCrawlLinkPicked(libId, site.id, l.id, next)
+      } catch (e) {
+        // 持久化失败，回滚乐观更新
+        setSite((prev) => {
+          if (!prev) return prev
+          return {
+            ...prev,
+            links: prev.links.map((l) => (ids.has(l.id) ? { ...l, picked: !next } : l)),
+          }
+        })
+        toast.error("批量操作失败，已回滚")
+      }
     })
   }
 
