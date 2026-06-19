@@ -8,11 +8,16 @@ export interface ApiSettings {
   apiKey: string // API Key（x-goog-api-key）
   model: string // 对话/生成模型（活动对话固定用它，默认 gemini-3.5-flash）
   inspectModel: string // 巡检模型（高级模型，默认 gemini-3.1-pro-high）
-  embedModel: string // 向量模型
+  embedModel: string // 向量模型（Gemini 端点用）
   // 独立嵌入端点：很多第三方对话中转不提供 embedding 模型，可在此单独指向带向量能力的端点。
   // 留空则回退主端点（baseUrl/apiKey）。
   embedBaseUrl: string
   embedApiKey: string
+  // 向量引擎选择：auto = 先尝试 Ollama 本地，失败回退 Gemini；ollama = 强制本地；gemini = 强制远程
+  embedProvider: "auto" | "ollama" | "gemini"
+  // Ollama 本地 embedding 配置
+  ollamaUrl: string // 默认 http://localhost:11434
+  ollamaEmbedModel: string // 默认 qwen3-embedding:0.6b（无 GPU 也能跑），有 6GB+ 显存可切 qwen3-embedding:8b
   temperature: number // 采样温度
   stream: boolean // 是否启用 SSE 流式
 }
@@ -32,6 +37,9 @@ function envDefaults(): ApiSettings {
     embedModel: process.env.GEMINI_EMBED_MODEL || "gemini-embedding-001",
     embedBaseUrl: process.env.GEMINI_EMBED_BASE_URL || "",
     embedApiKey: process.env.GEMINI_EMBED_API_KEY || "",
+    embedProvider: (process.env.EMBED_PROVIDER as any) || "auto",
+    ollamaUrl: process.env.OLLAMA_URL || "http://localhost:11434",
+    ollamaEmbedModel: process.env.OLLAMA_EMBED_MODEL || "qwen3-embedding:0.6b",
     temperature: Number.isFinite(t) ? t : 0,
     stream: (process.env.GEMINI_STREAM ?? "true").toLowerCase() !== "false",
   }
@@ -66,6 +74,9 @@ export function getSettings(): ApiSettings {
     // 嵌入端点留空是合法的（表示复用主端点），因此不回退默认值，仅做 trim。
     embedBaseUrl: s.embedBaseUrl?.trim() ?? defaults.embedBaseUrl,
     embedApiKey: s.embedApiKey?.trim() ?? defaults.embedApiKey,
+    embedProvider: s.embedProvider || defaults.embedProvider,
+    ollamaUrl: s.ollamaUrl?.trim() || defaults.ollamaUrl,
+    ollamaEmbedModel: s.ollamaEmbedModel?.trim() || defaults.ollamaEmbedModel,
     temperature: Number.isFinite(s.temperature) ? s.temperature : defaults.temperature,
     stream: typeof s.stream === "boolean" ? s.stream : defaults.stream,
   }

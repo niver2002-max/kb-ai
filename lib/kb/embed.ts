@@ -2,11 +2,57 @@ import { promises as fs } from "node:fs"
 import type { KbChunk, KbSource } from "./types"
 import type { ParsedSegment } from "./parse"
 import { geminiEmbedBatch, geminiEmbedOne, geminiParts } from "./gemini"
+import { ollamaEmbedBatch, ollamaEmbedOne, ollamaHealth } from "./ollama"
+import { getSettings } from "./settings"
 import { keywordSearch, tokenize } from "./retrieval"
 
-// 为一组文本片段生成 embedding（Gemini 原生批量向量端点），并组装成 chunk。
-// 关键容错：若嵌入端点不可用（部分第三方中转不提供向量服务，如持续 503），
-// 不再抛错丢失内容，而是以空向量入库；检索时自动降级为本地关键词检索。
+// 向量引擎路由：根据设置选择 Ollama 本地 / Gemini 远程 / 自动探测
+async function routeEmbedBatch(texts: string[]): Promise<number[][]> {
+  const provider = getSettings().embedProvider || "auto"
+
+  if (provider === "ollama") {
+    return ollamaEmbedBatch(texts)
+  }
+  if (provider === "gemini") {
+    return geminiEmbedBatch(texts)
+  }
+
+  // auto：先尝试 Ollama，失败回退 Gemini
+  const health = await ollamaHealth()
+  if (health.available) {
+    try {
+      return await ollamaEmbedBatch(texts)
+    } catch (e) {
+      console.log(`[v0] Ollama embedding 失败，回退 Gemini：${(e as Error).message}`)
+    }
+  }
+  return geminiEmbedBatch(texts)
+}
+
+async function routeEmbedOne(text: string): Promise<number[]> {
+  const provider = getSettings().embedProvider || "auto"
+
+  if (provider === "ollama") {
+    return ollamaEmbedOne(text)
+  }
+  if (provider === "gemini") {
+    return geminiEmbedOne(text, "RETRIEVAL_QUERY")
+  }
+
+  // auto
+  const health = await ollamaHealth()
+  if (health.available) {
+    try {
+      return await ollamaEmbedOne(text)
+    } catch (e) {
+      console.log(`[v0] Ollama 查询向量化失败，回退 Gemini：${(e as Error).message}`)
+    }
+  }
+  return geminiEmbedOne(text, "RETRIEVAL_QUERY")
+}
+
+// 为一组文本片段生成 embedding，组装成 chunk。
+// 路由：Ollama 本地 → Gemini 远程 → 空向量入库（BM25 降级）。
 export async function embedSegments(
   sourceId: string,
   segments: ParsedSegment[],
@@ -14,7 +60,7 @@ export async function embedSegments(
   if (segments.length === 0) return []
   let embeddings: number[][] = []
   try {
-    embeddings = await geminiEmbedBatch(segments.map((s) => s.text))
+    embeddings = await routeEmbedBatch(segments.map((s) => s.text))
   } catch (e) {
     console.log(`[v0] 嵌入不可用，内容以关键词模式入库：${(e as Error).message}`)
     embeddings = []
@@ -96,7 +142,7 @@ export async function searchChunks(
 
   if (hasVectors) {
     try {
-      const embedding = await geminiEmbedOne(query, "RETRIEVAL_QUERY")
+      const embedding = await routeEmbedOne(query)
       if (embedding.length > 0) {
         const scored = chunks
           .map((chunk) => ({ chunk, score: cosine(embedding, chunk.embedding) }))
